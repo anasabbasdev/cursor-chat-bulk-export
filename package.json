@@ -1,0 +1,61 @@
+{
+  "name": "cursor-chat-bulk-export",
+  "displayName": "Cursor Chat Bulk Export",
+  "description": "Export Cursor chat/composer/agent conversations to Markdown files bulk",
+  "version": "0.1.0",
+  "publisher": "AnasAbbasCode",
+   
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "cursor",
+    "chat",
+    "export",
+    "markdown",
+    "history"
+  ],
+  "activationEvents": [
+    "onCommand:cursorChatBulkExport.exportCurrentWorkspaceChats"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cursorChatExport.exportCurrentWorkspace",
+        "title": "Cursor Chat Bulk Export: Export Current Workspace Chats"
+      },
+      {
+        "command": "cursorChatExport.exportAllWorkspaces",
+        "title": "Cursor Chat Bulk Export: Export All Detected Workspace Chats"
+      },
+      {
+        "command": "cursorChatExport.openExportFolder",
+        "title": "Cursor Chat Bulk Export: Open Export Folder"
+      },
+      {
+        "command": "cursorChatExport.diagnose",
+        "title": "Cursor Chat Bulk Export: Diagnose Current Workspace Chat Schema"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node build.js",
+    "watch": "node build.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@types/sql.js": "^1.4.11",
+    "sql.js": "^1.14.1"
+  }
+}
