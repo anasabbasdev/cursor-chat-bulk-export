@@ -44,6 +44,26 @@ Cursor stores conversations in local SQLite databases under your user profile. T
 
 ---
 
+## Important — do not use v0.1.0
+
+**Version `0.1.0` has known critical issues** (broken discovery on newer Cursor installs, unreliable exports). **Do not install or stay on 0.1.0.**
+
+| Use instead | Notes |
+|-------------|--------|
+| **`0.1.2` or newer** | Current recommended release ([Open VSX](https://open-vsx.org/extension/AnasAbbasCode/cursor-chat-bulk-export) · [VS Marketplace](https://marketplace.visualstudio.com/items?itemName=AnasAbbasCode.cursor-chat-bulk-export)) |
+| **`0.1.1`** | Includes major discovery fixes; upgrade to `0.1.2+` when available |
+
+**If you already have 0.1.0 installed**
+
+1. Extensions → **Cursor Chat Bulk Export** → **⋯** → **Install Specific Version…** → choose **`0.1.2`** (or latest).
+2. Or download the `.vsix` from the [Open VSX download page](https://open-vsx.org/extension/AnasAbbasCode/cursor-chat-bulk-export) → **Install from VSIX…** → reload the window.
+
+**In Cursor:** the extension detail page may still show `0.1.0` as “current” while a newer version is already listed under **Install Specific Version** — that is a known Cursor marketplace cache delay, not a sign that the fix is unpublished.
+
+The publisher may remove `0.1.0` from Open VSX so new installs cannot select it. Users who already downloaded it must update manually (steps above).
+
+---
+
 ## Installation
 
 ### From VS Code Marketplace / Open VSX
