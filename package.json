@@ -2,7 +2,7 @@
   "name": "cursor-chat-bulk-export",
   "displayName": "Cursor Chat Bulk Export",
   "description": "Export Cursor chat/composer/agent conversations to Markdown files bulk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "AnasAbbasCode",
   "icon": "images/icon.png",
   "galleryBanner": {

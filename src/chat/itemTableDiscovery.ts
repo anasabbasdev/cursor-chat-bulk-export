@@ -183,6 +183,20 @@ function parseChatSessionStoreIndex(
     entryLists.push(data);
   }
 
+  // Newer Cursor: workspace ItemTable composer.composerData often only lists IDs
+  // (no workbench.panel.composerChatViewPane.* keys on fresh installs).
+  for (const id of collectComposerIdsFromWorkspaceIndex(root)) {
+    results.push({
+      id,
+      title: null,
+      createdAt: null,
+      updatedAt: null,
+      messages: [],
+      storagePath,
+      sessionType: /composer/i.test(key) ? 'composerIndex' : 'chatSessionStore',
+    });
+  }
+
   for (const list of entryLists) {
     const arr = list as unknown[];
     for (const item of arr) {
@@ -219,6 +233,29 @@ function parseChatSessionStoreIndex(
 
 function isUuidLike(id: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
+/** IDs referenced by composer.composerData on recent Cursor builds. */
+function collectComposerIdsFromWorkspaceIndex(root: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  const fields = [
+    'selectedComposerIds',
+    'lastFocusedComposerIds',
+    'pinnedComposerIds',
+    'openComposerIds',
+  ];
+  for (const field of fields) {
+    const arr = root[field];
+    if (!Array.isArray(arr)) {
+      continue;
+    }
+    for (const item of arr) {
+      if (typeof item === 'string' && isUuidLike(item)) {
+        ids.push(item);
+      }
+    }
+  }
+  return ids;
 }
 
 function stringOf(v: unknown): string | null {
