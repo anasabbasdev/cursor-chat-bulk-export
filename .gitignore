@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output (regenerate with: npm run compile)
+out/
+
+# Packaged extension (regenerate with: npx @vscode/vsce package)
+*.vsix
+
+# Extension test runner
+.vscode-test/
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs & env (never commit secrets)
+*.log
+npm-debug.log*
+.env
+.env.*
+
+# Editor — keep shared debug config, ignore personal settings
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Optional local / scratch (if you create these)
+*.vsix.zip
+.cursor-chat-export/
