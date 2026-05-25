@@ -1,118 +1,202 @@
 # Cursor Chat Bulk Export
 
-A VS Code / Cursor extension that exports your Cursor chat, composer, and agent conversation history to Markdown files — entirely locally, no network calls, no data leaves your machine.
+Export your **Cursor** chat, Composer, and Agent conversations to clean **Markdown** files — locally on your machine, read-only, no network uploads.
+
+Works in **Visual Studio Code** and **Cursor** (VS Code–compatible).
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+---
+
+## Why this extension?
+
+Cursor stores conversations in local SQLite databases under your user profile. There is no built-in “export all chats to Markdown” for a project. This extension:
+
+- Finds conversations tied to your **current workspace**
+- Lets you **pick which chats** to export
+- Writes one `.md` file per conversation plus an **`INDEX.md`** summary
+- Offers a **clean export** (no tool-call noise, no empty “thinking” stubs) or a **full raw** archive
 
 ---
 
 ## Features
 
-- Scans Cursor's local SQLite databases (`globalStorage/state.vscdb`, `cursorDiskKV` table)
-- Lists all conversations belonging to the currently open workspace
-- Multi-select QuickPick UI — choose individual conversations or all at once
-- **Clean export by default** — removes internal noise (tool calls, thinking blocks, empty messages)
-- Exports each conversation as a standalone `.md` file
-- Generates an `INDEX.md` summary file with per-conversation stats
-- Handles missing attachments/blobs gracefully (placeholder instead of crash)
-- Sanitises filenames for Windows
-- Never modifies Cursor's internal databases (read-only access)
+| Feature | Description |
+|--------|-------------|
+| **Workspace-scoped discovery** | Matches chats via path, storage hash, and folder name (useful after moving `wamp` → `laragon`, etc.) |
+| **Panel-based discovery** | Reads Cursor’s `composerChatViewPane` → `aichat.view` mapping so the list aligns with the UI better than path-only filters |
+| **Multi-select export** | QuickPick: export all or a subset |
+| **Deferred loading** | Fast scan first; message bodies load only for **selected** chats (important for multi‑GB databases) |
+| **Clean export (default)** | Drops tool-only messages, thinking placeholders, and empty bubbles |
+| **Large DB support** | Uses **sqlite3 CLI** when `globalStorage/state.vscdb` is over ~1.85 GB (sql.js limit) |
+| **Diagnostics** | Schema scan, conversation discovery report, raw candidate inspector |
+| **Safe** | Read-only DB access; never modifies Cursor data |
 
 ---
 
-## Clean Export vs Full Raw Export
+## Requirements
 
-After selecting conversations, the extension asks you to choose an export mode:
+- **VS Code** `^1.85.0` or **Cursor** (compatible host)
+- **Windows / macOS / Linux** — Cursor (or VS Code) with existing local chat data
+- For very large global databases (**~2 GB+** on Windows): [**SQLite CLI**](https://www.sqlite.org/download.html) on `PATH`, or `sqlite3.exe` beside the extension `out/` folder (see [Large databases](#large-databases-over-2-gb))
+
+---
+
+## Installation
+
+### From VS Code Marketplace / Open VSX
+
+1. Open **Extensions** (`Ctrl+Shift+X` / `Cmd+Shift+X`)
+2. Search for **Cursor Chat Bulk Export**
+3. Click **Install**
+4. Reload the window if prompted
+
+### From a `.vsix` file
+
+1. Download or build `cursor-chat-bulk-export-0.1.0.vsix`
+2. In VS Code/Cursor: **Extensions** → `...` → **Install from VSIX...**
+3. Select the file and reload
+
+### Build from source (developers)
+
+```bash
+git clone https://github.com/anasabbasdev/cursor-chat-bulk-export.git
+cd cursor-chat-bulk-export
+npm install
+npm run compile
+```
+
+Press **F5** to open an Extension Development Host with the extension loaded.
+
+Package a VSIX:
+
+```bash
+npx @vscode/vsce package
+```
+
+---
+
+## Quick start
+
+1. Open the **workspace folder** whose chats you want (the same folder you use in Cursor).
+2. `Ctrl+Shift+P` / `Cmd+Shift+P` → **Cursor Chat Bulk Export: Export Current Workspace Chats**
+3. Wait for **Scanning Cursor storage…** (usually seconds; headers only).
+4. Select conversations (Space to toggle, Enter to confirm).
+5. Choose **Clean export** (recommended) or **Full raw export**.
+6. Wait for **Loading chat messages…** (only for selected chats; large chats can take 1–3 minutes each).
+7. Files appear in **`.cursor-chat-export/`** in your project root.
+
+Open the folder: **Cursor Chat Bulk Export: Open Export Folder**.
+
+---
+
+## Commands
+
+| Command | What it does |
+|---------|----------------|
+| **Export Current Workspace Chats** | Discover chats for the open workspace → pick → export to `.cursor-chat-export/` |
+| **Export All Detected Workspace Chats** | Scan all workspaces in Cursor storage → pick workspace → pick chats → export |
+| **Open Export Folder** | Reveal `.cursor-chat-export/` in the file manager |
+| **Diagnose Current Workspace Chat Schema** | Log ItemTable keys and sample values for the current workspace DB |
+| **Diagnose Conversation Discovery** | Full discovery report (counts, DB sizes, mismatch hints); optional UI count comparison |
+| **Raw Discovery Mode** | Inspect every discovery candidate (parsed or not) in the Output channel |
+
+All commands are available from the Command Palette.
+
+---
+
+## Export workflow (scan → pick → load → write)
+
+```text
+Scan (fast)     →  QuickPick      →  Load messages   →  Write .md
+metadata only      your selection     selected only      + INDEX.md
+```
+
+- **Scan** does not load every bubble in a 2 GB database — only titles, IDs, and estimated message counts.
+- **Load** runs per selected conversation and fetches only bubbles referenced in `composerData` headers (not every historical `bubbleId` row).
+
+Progress messages:
+
+- `Scanning Cursor storage…`
+- `Loading chat messages… 3/10: <chat title>`
+- `Exporting conversations…`
+
+---
+
+## Clean export vs full raw export
 
 ### Clean export *(recommended, default)*
 
-Produces a compact, LLM-friendly Markdown transcript:
+Produces a compact, LLM-friendly transcript:
 
-- **User messages** — preserved as-is
-- **Assistant messages** — preserved as-is (explanations, code, answers)
-- **Tool call noise removed** — messages whose content is only an internal ID like `` `tool_e21919a9-...` `` or `` `call_xxxxx` `` are silently dropped
-- **Thinking placeholders removed** — assistant messages that contain only `**Thinking**`, `*Thinking*`, `Thinking...`, etc. are dropped
-- **Empty messages removed** — whitespace-only or separator-only content is skipped
+- **User** and **assistant** text kept
+- **Tool-only lines removed** (e.g. `` `tool_…` ``, `` `call_…` ``)
+- **Thinking-only placeholders removed** (`**Thinking**`, `Thinking...`, etc.)
+- **Empty messages skipped**
 
-The result is clean, readable, and easy to paste back into a new chat as context.
+Good for backups, documentation, or pasting context into a new chat.
 
 ### Full raw export
 
-Everything is included verbatim — tool calls, thinking blocks, empty messages. Useful for debugging the parser or archiving every internal Cursor event.
+Includes tool calls, thinking blocks, and empty messages — useful for debugging or complete archival.
 
 ---
 
-## Installation & Setup
+## Settings
 
-### Prerequisites
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `cursorChatExport.includePossibleWorkspaceMatches` | `true` | Match by **folder name** when the full path changed (e.g. `c:\wamp64\www\MyApp` vs `c:\laragon\www\MyApp`) |
+| `cursorChatExport.cursorUserDataPath` | `""` | Optional path to a **copy** of Cursor’s `User` folder (see below) |
 
-- [Node.js](https://nodejs.org/) ≥ 18
-- npm ≥ 9
+**Settings JSON example:**
 
-### 1. Install dependencies
-
-```bash
-cd path/to/MDCursorExporter
-npm install
+```json
+{
+  "cursorChatExport.includePossibleWorkspaceMatches": true,
+  "cursorChatExport.cursorUserDataPath": ""
+}
 ```
 
-### 2. Build
+### Using a copied Cursor folder (diagnostics / migration)
 
-```bash
-npm run build
+If you copied `%APPDATA%\Cursor\User` from another PC (e.g. `D:\Cursor\User`) **only for inspection**, set:
+
+```json
+"cursorChatExport.cursorUserDataPath": "D:\\Cursor\\User"
 ```
 
-Or start the file watcher:
+Or set environment variable `CURSOR_APPDATA` to the parent of `User` (the folder that contains `User\globalStorage` and `User\workspaceStorage`).
 
-```bash
-npm run watch
+**Normal export** should use the **live** Cursor data on the machine where you run Cursor, not a stale copy — otherwise chats won’t match what you see in the UI.
+
+Expected layout:
+
+```text
+User/
+├── globalStorage/
+│   └── state.vscdb          ← main DB (composerData, bubbleId); often 1–3+ GB
+└── workspaceStorage/
+    └── <hash>/
+        ├── workspace.json
+        └── state.vscdb      ← per-workspace UI / panel metadata
 ```
-
-### 3. Run in VS Code / Cursor
-
-Press **F5** in the extension project to launch an Extension Development Host window with the extension loaded.
 
 ---
 
-## Usage
+## Output format
 
-Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run:
-
-### `Cursor Chat Bulk Export: Export Current Workspace Chats`
-
-1. Detects the currently open workspace folder
-2. Locates all matching Cursor conversations in `globalStorage`
-3. Shows a multi-select list of conversations found
-4. Asks: **Clean export** or **Full raw export**
-5. Exports selected conversations to `.cursor-chat-export/` in your project root
-
-### `Cursor Chat Bulk Export: Export All Detected Workspace Chats`
-
-1. Scans **all** workspace storage entries (not just the current one)
-2. Lets you pick a workspace
-3. Then pick conversations
-4. Asks: **Clean export** or **Full raw export**
-5. Exports to `.cursor-chat-export/` in the active project
-
-### `Cursor Chat Bulk Export: Open Export Folder`
-
-Opens `.cursor-chat-export/` in your OS file manager.
-
-### `Cursor Chat Bulk Export: Diagnose Current Workspace Chat Schema`
-
-Scans the current workspace's storage and prints detailed schema diagnostics to the Output Channel. Useful if conversations are not being found.
-
----
-
-## Output Format
-
-```
+```text
 .cursor-chat-export/
 ├── INDEX.md
+├── diagnostics/
+│   └── conversation-discovery-report.md   ← after Diagnose Conversation Discovery
 ├── 2026-05-24__fix-login-session-error.md
 ├── 2026-05-24__docker-erp-setup.md
 └── 2026-05-24__untitled-chat-03.md
 ```
 
-Each conversation file looks like:
+**Per-conversation file:**
 
 ```markdown
 # Fix login session error
@@ -136,126 +220,160 @@ How do I fix the session expiry bug in auth.ts?
 ## Assistant
 
 The issue is in the `refreshToken` function…
-
----
 ```
 
-The `INDEX.md` shows per-conversation stats:
-
-```markdown
-- 2026-05-24__fix-login-session.md — Fix login session error — 2026-05-24
-  - Messages exported: 28, Internal filtered: 64
-  - Roles: User 12, Assistant 16
-```
+**INDEX.md** lists each file with exported vs filtered counts and role breakdowns.
 
 ---
 
-## Debugging
+## How discovery works (short)
 
-If conversations are not found, open the **Cursor Chat Bulk Export** Output Channel:
+Cursor splits data across:
 
-- **View → Output** → select **Cursor Chat Bulk Export** from the dropdown
+1. **`globalStorage/state.vscdb`** — table `cursorDiskKV`: `composerData:<id>` (metadata + message headers), `bubbleId:<composerId>:<bubbleId>` (message text).
+2. **`workspaceStorage/<hash>/state.vscdb`** — table `ItemTable`: UI state, including `workbench.panel.composerChatViewPane.<tabId>` whose JSON points to `workbench.panel.aichat.view.<composerId>`.
 
-Then run **Diagnose Current Workspace Chat Schema** or **Diagnose Conversation Discovery** for detailed per-conversation diagnostics.
+The extension:
 
-### Diagnose Conversation Discovery
-
-Run **Cursor Chat Bulk Export: Diagnose Conversation Discovery** to explain why export count may differ from Cursor UI (e.g. 47 in UI vs 5 exported).
-
-The report is written to:
-
-`.cursor-chat-export/diagnostics/conversation-discovery-report.md`
-
-It includes DB sizes, table row counts, suspicious key patterns, composer counts before/after workspace filter, dedupe stats, and a mismatch case (A/B/C/D).
-
-**Raw Discovery Mode** lists every candidate record (parsed or not) so you can see if missing chats are found but not parsed.
-
-### Workspace matching (moved projects)
-
-Setting `cursorChatExport.includePossibleWorkspaceMatches` (default `true`) matches conversations when the folder name matches even if the full path changed (e.g. `c:\wamp64\www\Newgwireless` vs `c:\laragon\www\Newgwireless`).
-
-### Reading storage from an old PC copy (`D:\Cursor`)
-
-If you copied Cursor data from another machine (e.g. `D:\Cursor\User`), set in VS Code/Cursor settings:
-
-```json
-"cursorChatExport.cursorUserDataPath": "D:\\Cursor\\User"
-```
-
-Or set environment variable `CURSOR_APPDATA` to the parent folder that contains `User\globalStorage` and `User\workspaceStorage`.
-
-The copied folder should eventually contain:
-
-- `User\globalStorage\state.vscdb` — main chat database (can be 2+ GB)
-- `User\workspaceStorage\<hash>\` — per-workspace metadata
-
-**Diagnose Conversation Discovery** uses a lightweight scan on large DBs (counts + sample keys only) so it does not crash with "Maximum call stack size exceeded".
-
----
-
-## Architecture
-
-```
-src/
-├── extension.ts              Entry point — activate/deactivate
-├── logger.ts                 OutputChannel-backed logger
-├── types.ts                  Shared TypeScript interfaces + ExportOptions
-├── storage/
-│   ├── cursorStorage.ts      Locate Cursor user-data directory (cross-platform)
-│   ├── cursorDiskKV.ts       Read composerData + bubbleId records from globalStorage
-│   ├── workspaceScanner.ts   Scan & match workspaceStorage entries
-│   └── sqliteReader.ts       Open & query state.vscdb read-only (sql.js / WASM)
-├── chat/
-│   ├── schemaDiscovery.ts    Heuristic key filtering + schema logging
-│   ├── chatParser.ts         composerData → Conversation (current Cursor schema)
-│   └── legacyParser.ts       ItemTable-based parser (older Cursor versions)
-├── export/
-│   ├── exportFilter.ts       shouldExportMessage + isToolCallOnly + isThinkingOnly
-│   ├── filenameSanitizer.ts  Windows-safe filename generation
-│   ├── markdownExporter.ts   Render Conversation → Markdown (with filtering)
-│   └── indexGenerator.ts     Write INDEX.md with filtered/visible counts
-└── ui/
-    └── commands.ts           Register commands + QuickPick + export pipeline
-```
+1. Resolves workspace storage hashes for your folder path (and optional folder-name match).
+2. Collects composer IDs from workspace panel keys.
+3. Loads matching `composerData` from global storage (SQL scope + direct ID lookup).
+4. On export, loads only bubbles listed in each composer’s headers.
 
 ---
 
 ## Large databases (over ~2 GB)
 
-Cursor's `globalStorage/state.vscdb` can grow very large (2+ GB). The built-in sql.js reader cannot open files that large.
+`globalStorage/state.vscdb` can exceed **2 GB**. Built-in **sql.js** cannot open files that large; the extension switches to the **sqlite3** command-line tool automatically.
 
-The extension automatically uses the **sqlite3 command-line tool** when the global database exceeds ~1.85 GB.
+### Windows setup
 
-### Windows setup (required on machines with huge chat history)
-
-1. Install SQLite tools (pick one):
+1. Install SQLite (one of):
    - `winget install SQLite.SQLite`
-   - Or download [sqlite-tools-win-x64.zip](https://www.sqlite.org/download.html), extract `sqlite3.exe`
-2. Either add `sqlite3` to your PATH, **or** copy `sqlite3.exe` into the extension's `out/` folder next to `extension.js`:
-   - Dev: `MDCursorExporter/out/sqlite3.exe`
+   - [sqlite-tools-win-x64.zip](https://www.sqlite.org/download.html) → extract `sqlite3.exe`
+2. Either add `sqlite3` to **PATH**, **or** copy `sqlite3.exe` next to the extension bundle:
+   - Development: `MDCursorExporter/out/sqlite3.exe`
    - Installed: `%USERPROFILE%\.cursor\extensions\anasabbascode.cursor-chat-bulk-export-<version>\out\sqlite3.exe`
+   - Same pattern under `%USERPROFILE%\.vscode\extensions\` if installed in VS Code
 
-After installing, run export again. The Output Channel should show: `Opened DB via cli`.
-
----
-
-## Known Limitations
-
-- **Schema changes** — Cursor's internal storage format is undocumented and may change between versions. Run the Diagnose command to inspect what's in your database.
-- **Large databases** — Very large chat histories may take a few seconds to parse. A progress indicator is shown.
-- **Workspace matching** — Conversations are matched to your workspace by URI path and storage hash. If you moved a project, some conversations may not be associated automatically.
+Confirm in **Output → Cursor Chat Bulk Export**: `Opened DB via cli`.
 
 ---
 
-## Safety
+## Troubleshooting
 
-- Opens all Cursor databases with read-only access via `sql.js` (pure WASM — no native compilation needed).
-- Never deletes any files.
-- Never uploads data anywhere.
-- If an export file already exists, a numeric suffix is added (`filename-2.md`) rather than overwriting.
+### Output channel
+
+**View → Output** → **Cursor Chat Bulk Export**. Run any command; logs appear here.
+
+### UI shows more chats than export finds
+
+Run **Diagnose Conversation Discovery**. Optionally enter how many chats Cursor’s UI shows (e.g. `48`).
+
+Report path: `.cursor-chat-export/diagnostics/conversation-discovery-report.md`
+
+| Case | Meaning |
+|------|---------|
+| **A** | Very few candidates — discovery incomplete |
+| **B** | Many candidates, few parsed — parser gap |
+| **C** | Many parsed, few after dedupe — duplicate IDs |
+| **D** | Many global composers, few match workspace — path/hash filter |
+| **OK** | Export count close to your UI hint |
+
+**Raw Discovery Mode** shows each candidate key and whether it parsed.
+
+### Chat stuck on “Loading chat” in Cursor (never finishes)
+
+That usually means **no full local copy** of the conversation (cloud/synced or never downloaded). The extension **cannot export** chats that Cursor itself cannot open. Titles may still appear in the list from workspace metadata.
+
+Try: same account, internet, open the chat once on the old machine, wait for sync, then export again.
+
+### Export is slow
+
+Expected for large histories:
+
+- **Scan**: seconds (metadata only).
+- **Load**: depends on selected chats; a chat with hundreds of messages may take **1–3+ minutes** on a 2 GB DB.
+- **Write Markdown**: usually seconds.
+
+Export **fewer chats at a time** if needed.
+
+### No conversations found
+
+1. Run **Diagnose Current Workspace Chat Schema** and **Diagnose Conversation Discovery**.
+2. Ensure the correct workspace folder is open.
+3. On large DBs, install **sqlite3** (see above).
+4. Set `cursorChatExport.includePossibleWorkspaceMatches` to `true` if the project path moved.
+
+### Stack overflow / crash on diagnose (old versions)
+
+Current builds use a **light scan** on huge DBs (counts + samples, not full key enumeration). Update to the latest VSIX if you still see `Maximum call stack size exceeded`.
+
+---
+
+## Architecture
+
+```text
+src/
+├── extension.ts                 Activate / register commands
+├── logger.ts                    Output channel logger
+├── types.ts                     Conversation, ExportOptions, etc.
+├── storage/
+│   ├── cursorStorage.ts         Resolve Cursor User path (APPDATA / settings)
+│   ├── cursorDiskKV.ts          composerData + bubbleId (header-scoped load)
+│   ├── workspaceScanner.ts      workspaceStorage scan + primary entry selection
+│   ├── sqliteReader.ts          sql.js (WASM) for smaller DBs
+│   ├── sqliteCliReader.ts       sqlite3 CLI for DBs ≥ ~1.85 GB
+│   └── dbBackend.ts             Unified DB backend (sqljs | cli)
+├── workspace/
+│   └── workspaceMatch.ts        Path / hash / folder-name matching
+├── chat/
+│   ├── chatParser.ts            composerData + bubbles → Conversation
+│   ├── itemTableDiscovery.ts    Panel keys + ChatSessionStore index
+│   ├── schemaDiscovery.ts       ItemTable chat key heuristics
+│   └── legacyParser.ts          Older ItemTable-only format
+├── discovery/
+│   ├── conversationDiscovery.ts Scan, defer load, hydrate for export
+│   ├── discoveryReport.ts       Markdown diagnostic report
+│   ├── lightDbScan.ts           Safe large-DB sampling
+│   └── dedupeConversations.ts   Merge duplicate IDs
+├── export/
+│   ├── exportFilter.ts          Clean vs raw filtering
+│   ├── markdownExporter.ts      Conversation → .md
+│   ├── filenameSanitizer.ts     Safe Windows filenames
+│   └── indexGenerator.ts        INDEX.md
+└── ui/
+    └── commands.ts                Command Palette + QuickPick pipeline
+```
+
+---
+
+## Known limitations
+
+- **Undocumented Cursor schema** — may change between Cursor versions; use Diagnose commands after upgrades.
+- **Cloud-only / NAL chats** — `composerData` may exist with `isNAL: true` while bubbles are missing locally; export shows placeholders or skips empty chats.
+- **Chats that never load in Cursor** — not recoverable from local SQLite alone.
+- **Performance** — very large `state.vscdb` + many long chats: export can take tens of minutes; select subsets.
+- **Workspace association** — matching uses path, hash, and folder name heuristics; not 100% identical to Cursor’s UI in every edge case.
+
+---
+
+## Privacy & safety
+
+- **Read-only** access to Cursor databases (sql.js or sqlite3 `-readonly`).
+- **No network** calls; nothing is sent to third parties.
+- **No writes** to Cursor storage; export files go only under your project’s `.cursor-chat-export/`.
+- Existing `.md` files are not overwritten — a numeric suffix is added (`name-2.md`).
+
+---
+
+## Contributing & support
+
+- **Issues:** [github.com/anasabbasdev/cursor-chat-bulk-export/issues](https://github.com/anasabbasdev/cursor-chat-bulk-export/issues)
+- **Repository:** [github.com/anasabbasdev/cursor-chat-bulk-export](https://github.com/anasabbasdev/cursor-chat-bulk-export)
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE) — Copyright (c) Anas Abbas Code

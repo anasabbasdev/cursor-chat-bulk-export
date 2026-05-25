@@ -4,6 +4,11 @@
   "description": "Export Cursor chat/composer/agent conversations to Markdown files bulk",
   "version": "0.1.0",
   "publisher": "AnasAbbasCode",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/anasabbasdev/cursor-chat-bulk-export.git"
