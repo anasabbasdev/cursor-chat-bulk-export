@@ -44,17 +44,38 @@ const CAPABILITY_LABELS: Record<number, string> = {
  * @param bubbles   Map of bubbleId → BubbleContent (loaded from cursorDiskKV)
  * @param logger
  */
+export interface ComposerParseOptions {
+  /** Include archived/internal bubbles (default true for full history). */
+  includeNonRenderable?: boolean;
+}
+
 export function composerToConversation(
   composer: ComposerHeader,
   bubbles: Map<string, BubbleContent>,
-  logger: Logger
+  logger: Logger,
+  options: ComposerParseOptions = {}
 ): Conversation {
+  const includeNonRenderable = options.includeNonRenderable !== false;
   const messages: ChatMessage[] = [];
   const parseErrors: string[] = [];
 
-  for (const header of composer.headers) {
-    // Skip internal/non-renderable bubbles
-    if (!header.isRenderable) {
+  const headersToWalk =
+    composer.headers.length > 0
+      ? composer.headers
+      : [...bubbles.keys()].map(bubbleId => ({
+          bubbleId,
+          type: 0,
+          isRenderable: true,
+          hasText: true,
+          isSimulatedMsg: false,
+          capabilityType: null,
+          toolFormerTool: null,
+          toolCallId: null,
+          hasThinking: false,
+        }));
+
+  for (const header of headersToWalk) {
+    if (!includeNonRenderable && !header.isRenderable) {
       continue;
     }
 

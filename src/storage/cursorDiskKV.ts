@@ -56,11 +56,27 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Logger } from '../types';
-import { openDatabase, closeDatabase, listTables } from './sqliteReader';
+import type { DbBackend } from './dbBackend';
+import { formatSizeMb, getDatabaseSizeBytes } from './dbBackend';
+import {
+  openDatabaseBackend,
+  closeDatabaseBackend,
+  listTablesBackend,
+} from './sqliteReader';
+import { buildComposerFilterSql } from './sqliteCliReader';
+import {
+  filterComposersByWorkspace as filterComposersByWorkspaceMatch,
+  type WorkspaceMatchOptions,
+} from '../workspace/workspaceMatch';
 
-// Re-export database type alias
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SqlDatabase = any;
+export type { WorkspaceMatchOptions };
+
+export interface WorkspaceDbFilter {
+  workspacePath: string;
+  storageHashes: string[];
+  /** When true, CLI uses SQL LIKE filter (can miss moved/archived paths). Default false. */
+  useSqlPrefilter?: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -116,8 +132,8 @@ export interface BubbleContent {
 /**
  * Returns true if the database has a cursorDiskKV table (newer Cursor format).
  */
-export function hasCursorDiskKV(db: SqlDatabase, logger: Logger): boolean {
-  const tables = listTables(db, logger);
+export function hasCursorDiskKV(db: DbBackend, logger: Logger): boolean {
+  const tables = listTablesBackend(db, logger);
   return tables.some(t => t.name === 'cursorDiskKV');
 }
 
@@ -129,21 +145,35 @@ export function hasCursorDiskKV(db: SqlDatabase, logger: Logger): boolean {
  * Reads all composer metadata from the cursorDiskKV table.
  * Does NOT load individual bubble content (kept separate for performance).
  */
-export function readAllComposerHeaders(db: SqlDatabase, logger: Logger): ComposerHeader[] {
+export function readAllComposerHeaders(
+  db: DbBackend,
+  logger: Logger,
+  workspaceFilter?: WorkspaceDbFilter
+): ComposerHeader[] {
   const headers: ComposerHeader[] = [];
 
-  try {
-    const result = db.exec(
-      `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`
+  let sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`;
+  if (workspaceFilter?.useSqlPrefilter && db.kind === 'cli') {
+    sql = buildComposerFilterSql(
+      workspaceFilter.workspacePath,
+      workspaceFilter.storageHashes
     );
-    if (!result.length || !result[0].values.length) {
+    logger.warn(
+      'Using SQL workspace prefilter on large DB — may miss archived/moved conversations. ' +
+        'Disable useSqlPrefilter for full discovery.'
+    );
+  }
+
+  try {
+    const result = db.exec(sql);
+    if (!result.length || !result[0].rows.length) {
       logger.log('No composerData entries found in cursorDiskKV');
       return headers;
     }
 
-    logger.log(`Found ${result[0].values.length} composerData entries`);
+    logger.log(`Found ${result[0].rows.length} composerData entries`);
 
-    for (const [key, rawValue] of result[0].values as [string, string | Uint8Array | null][]) {
+    for (const [key, rawValue] of result[0].rows as [string, string | Uint8Array | null][]) {
       try {
         const str =
           rawValue instanceof Uint8Array
@@ -171,6 +201,162 @@ export function readAllComposerHeaders(db: SqlDatabase, logger: Logger): Compose
 
   logger.log(`Parsed ${headers.length} composer headers`);
   return headers;
+}
+
+/**
+ * Reads composer headers likely belonging to a workspace.
+ * On large DBs uses SQL text filter (folder path + hashes) instead of loading every composerData row.
+ */
+export function readComposerHeadersForWorkspace(
+  db: DbBackend,
+  workspacePath: string,
+  storageHashes: string[],
+  logger: Logger
+): { headers: ComposerHeader[]; totalInDb: number; usedSqlPrefilter: boolean } {
+  const totalInDb = countComposerDataKeys(db, logger);
+
+  let sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`;
+  const useSqlFilter = db.kind === 'cli' || totalInDb > 800;
+
+  if (useSqlFilter) {
+    sql = buildComposerFilterSql(workspacePath, storageHashes);
+    logger.log(
+      `Loading composerData with workspace SQL filter (${totalInDb} total in DB, backend=${db.kind})`
+    );
+  } else {
+    logger.log(`Loading all ${totalInDb} composerData rows (small DB)`);
+  }
+
+  const headers: ComposerHeader[] = [];
+  try {
+    const result = db.exec(sql);
+    if (!result.length || !result[0].rows.length) {
+      logger.log('No composerData rows for workspace filter');
+      return { headers, totalInDb, usedSqlPrefilter: useSqlFilter };
+    }
+
+    logger.log(`composerData rows returned by query: ${result[0].rows.length}`);
+
+    for (const [key, rawValue] of result[0].rows as [string, string | Uint8Array | null][]) {
+      try {
+        const str =
+          rawValue instanceof Uint8Array
+            ? Buffer.from(rawValue).toString('utf8')
+            : rawValue === null
+              ? null
+              : String(rawValue);
+
+        if (!str || str.length > 20_000_000) {
+          continue;
+        }
+
+        const parsed = JSON.parse(str) as Record<string, unknown>;
+        const header = parseComposerData(key, parsed, logger);
+        if (header) {
+          headers.push(header);
+        }
+      } catch (err) {
+        const msg = String(err);
+        if (!msg.includes('Maximum call stack')) {
+          logger.warn(`Failed to parse composerData "${key}": ${msg}`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.error('readComposerHeadersForWorkspace failed', err);
+  }
+
+  logger.log(`Parsed ${headers.length} composer headers from workspace query`);
+  return { headers, totalInDb, usedSqlPrefilter: useSqlFilter };
+}
+
+/**
+ * Loads composerData in batches (safe for huge DBs). Stops after maxBatches.
+ */
+export function readComposerHeadersBatch(
+  db: DbBackend,
+  logger: Logger,
+  offset: number,
+  limit: number
+): ComposerHeader[] {
+  const headers: ComposerHeader[] = [];
+  const sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' LIMIT ${limit} OFFSET ${offset}`;
+  try {
+    const result = db.exec(sql);
+    if (!result.length) {
+      return headers;
+    }
+    for (const [key, rawValue] of result[0].rows as [string, string | Uint8Array | null][]) {
+      try {
+        const str =
+          rawValue instanceof Uint8Array
+            ? Buffer.from(rawValue).toString('utf8')
+            : rawValue === null
+              ? null
+              : String(rawValue);
+        if (!str || str.length > 15_000_000) {
+          continue;
+        }
+        const parsed = JSON.parse(str) as Record<string, unknown>;
+        const header = parseComposerData(key, parsed, logger);
+        if (header) {
+          headers.push(header);
+        }
+      } catch {
+        // skip bad row
+      }
+    }
+  } catch (err) {
+    logger.warn(`Batch offset=${offset} failed: ${String(err)}`);
+  }
+  return headers;
+}
+
+/**
+ * After SQL prefilter, optionally scan all composerData in batches and merge matches.
+ */
+export function discoverComposersExhaustive(
+  db: DbBackend,
+  workspacePath: string,
+  storageHashes: string[],
+  logger: Logger,
+  includePossibleByFolderName: boolean,
+  initial: ComposerHeader[]
+): ComposerHeader[] {
+  const seen = new Set(initial.map(c => c.composerId));
+  const merged = [...initial];
+  const batchSize = 150;
+  const maxBatches = 80;
+
+  logger.log(
+    `Batch scan: starting with ${initial.length} from SQL filter, scanning up to ${maxBatches * batchSize} rows…`
+  );
+
+  for (let b = 0; b < maxBatches; b++) {
+    const batch = readComposerHeadersBatch(db, logger, b * batchSize, batchSize);
+    if (batch.length === 0) {
+      break;
+    }
+    const matched = filterComposersByWorkspace(
+      batch,
+      workspacePath,
+      logger,
+      storageHashes,
+      includePossibleByFolderName
+    );
+    for (const c of matched) {
+      if (!seen.has(c.composerId)) {
+        seen.add(c.composerId);
+        merged.push(c);
+      }
+    }
+    if (b % 10 === 0) {
+      logger.log(`  batch ${b + 1}: scanned ${(b + 1) * batchSize}, merged total ${merged.length}`);
+    }
+  }
+
+  logger.log(`Batch scan complete: ${merged.length} composers for workspace`);
+  return merged;
 }
 
 function parseComposerData(
@@ -250,26 +436,69 @@ function parseComposerData(
  * Uses a single SQL LIKE query to load all bubbles at once (faster than
  * individual lookups for large composers).
  */
+const BUBBLE_LOAD_CHUNK = 40;
+
 export function loadBubblesForComposer(
-  db: SqlDatabase,
+  db: DbBackend,
   composerId: string,
-  logger: Logger
+  logger: Logger,
+  /** When set, only load these bubble rows (much faster than scanning all bubbleId:composerId:*) */
+  bubbleIds?: string[]
 ): Map<string, BubbleContent> {
   const map = new Map<string, BubbleContent>();
 
   try {
+    const uniqueIds = [...new Set((bubbleIds ?? []).filter(id => id.length > 0))];
+
+    if (uniqueIds.length > 0) {
+      const t0 = Date.now();
+      for (let offset = 0; offset < uniqueIds.length; offset += BUBBLE_LOAD_CHUNK) {
+        const chunk = uniqueIds.slice(offset, offset + BUBBLE_LOAD_CHUNK);
+        const keys = chunk
+          .map(b => `'${escapeSqlKey(`bubbleId:${composerId}:${b}`)}'`)
+          .join(',');
+        const result = db.exec(
+          `SELECT key, value FROM cursorDiskKV WHERE key IN (${keys})`
+        );
+        if (result.length) {
+          parseBubbleRows(result[0].rows, composerId, map, logger);
+        }
+      }
+      logger.log(
+        `Loaded ${map.size}/${uniqueIds.length} bubble(s) for ${composerId} in ${Date.now() - t0}ms (header-scoped)`
+      );
+      return map;
+    }
+
     const result = db.exec(
       `SELECT key, value FROM cursorDiskKV WHERE key LIKE ?`,
       [`bubbleId:${composerId}:%`]
     );
-    if (!result.length || !result[0].values.length) {
+    if (!result.length || !result[0].rows.length) {
       logger.log(`No bubble records found for composer ${composerId}`);
       return map;
     }
 
-    logger.log(`Loading ${result[0].values.length} bubbles for composer ${composerId}`);
+    logger.log(`Loading ${result[0].rows.length} bubbles for composer ${composerId} (full LIKE scan)`);
+    parseBubbleRows(result[0].rows, composerId, map, logger);
+  } catch (err) {
+    logger.error(`Failed to load bubbles for composer ${composerId}`, err);
+  }
 
-    for (const [key, rawValue] of result[0].values as [string, string | Uint8Array | null][]) {
+  return map;
+}
+
+function escapeSqlKey(key: string): string {
+  return key.replace(/'/g, "''");
+}
+
+function parseBubbleRows(
+  rows: unknown[][],
+  composerId: string,
+  map: Map<string, BubbleContent>,
+  logger: Logger
+): void {
+  for (const [key, rawValue] of rows as [string, string | Uint8Array | null][]) {
       try {
         const str =
           rawValue instanceof Uint8Array
@@ -291,11 +520,6 @@ export function loadBubblesForComposer(
         logger.warn(`Failed to parse bubble "${key}": ${String(err)}`);
       }
     }
-  } catch (err) {
-    logger.error(`Failed to load bubbles for composer ${composerId}`, err);
-  }
-
-  return map;
 }
 
 function parseBubbleContent(
@@ -345,38 +569,39 @@ export function extractTextFromLexicalJson(richTextJson: string): string {
   }
 }
 
-function collectLexicalText(node: unknown, parts: string[]): void {
-  if (!node || typeof node !== 'object') {
+function collectLexicalText(node: unknown, parts: string[], visited = new WeakSet<object>(), depth = 0): void {
+  if (!node || typeof node !== 'object' || depth > 32) {
     return;
   }
   const n = node as Record<string, unknown>;
+  if (visited.has(n)) {
+    return;
+  }
+  visited.add(n);
 
   if (n['type'] === 'text' && typeof n['text'] === 'string') {
     parts.push(n['text']);
     return;
   }
 
-  // newline nodes
   if (n['type'] === 'linebreak') {
     parts.push('\n');
     return;
   }
 
-  // paragraph node ends with newline
   const children = n['children'];
   if (Array.isArray(children)) {
     for (const child of children) {
-      collectLexicalText(child, parts);
+      collectLexicalText(child, parts, visited, depth + 1);
     }
     if (n['type'] === 'paragraph' || n['type'] === 'heading') {
       parts.push('\n');
     }
   }
 
-  // root node
   const rootNode = n['root'];
   if (rootNode) {
-    collectLexicalText(rootNode, parts);
+    collectLexicalText(rootNode, parts, visited, depth + 1);
   }
 }
 
@@ -386,69 +611,68 @@ function collectLexicalText(node: unknown, parts: string[]): void {
 
 /**
  * Filters composer headers to those belonging to the given workspace path.
- * Also accepts a list of workspaceStorage hashes (from scanning workspaceStorage)
- * to handle composers that only store a hash ID without a resolved URI.
  */
 export function filterComposersByWorkspace(
   composers: ComposerHeader[],
   workspacePath: string,
   logger: Logger,
-  workspaceStorageHashes: string[] = []
+  workspaceStorageHashes: string[] = [],
+  includePossibleByFolderName = true
 ): ComposerHeader[] {
-  const normTarget = normaliseWsPath(workspacePath);
-  const hashSet = new Set(workspaceStorageHashes.map(h => h.toLowerCase()));
-
-  const matches = composers.filter(c => {
-    // Match by resolved fsPath
-    if (c.workspaceFsPath && normaliseWsPath(c.workspaceFsPath) === normTarget) {
-      return true;
-    }
-    // Match by external file URI decoded to path
-    if (c.workspaceExternalUri) {
-      const decoded = fileUriToFsPath(c.workspaceExternalUri);
-      if (decoded && normaliseWsPath(decoded) === normTarget) {
-        return true;
-      }
-    }
-    // Match by workspaceStorage hash (used when URI is not resolved)
-    if (c.workspaceStorageId && hashSet.has(c.workspaceStorageId.toLowerCase())) {
-      return true;
-    }
-    return false;
-  });
-
-  logger.log(
-    `Workspace filter: ${matches.length}/${composers.length} composers match "${workspacePath}"` +
-      (workspaceStorageHashes.length > 0
-        ? ` (hashes: ${workspaceStorageHashes.join(', ')})`
-        : '')
-  );
-  return matches;
+  const options: WorkspaceMatchOptions = {
+    workspacePath,
+    storageHashes: workspaceStorageHashes,
+    includePossibleByFolderName,
+  };
+  return filterComposersByWorkspaceMatch(composers, options, logger);
 }
 
-function normaliseWsPath(p: string): string {
-  let n = p.replace(/[\\/]+$/, '').trim();
-  if (process.platform === 'win32') {
-    n = n.toLowerCase().replace(/\//g, '\\');
-  }
-  return n;
-}
-
-function fileUriToFsPath(uri: string): string | null {
+/** Count all composerData:* rows in cursorDiskKV. */
+export function countComposerDataKeys(db: DbBackend, logger: Logger): number {
   try {
-    const url = new URL(uri);
-    if (url.protocol !== 'file:') {
+    const r = db.exec(
+      `SELECT COUNT(*) FROM cursorDiskKV WHERE key LIKE 'composerData:%'`
+    );
+    if (!r.length || !r[0].rows.length) {
+      return 0;
+    }
+    const n = Number(r[0].rows[0][0]);
+    logger.log(`Total composerData:* keys in DB: ${n}`);
+    return n;
+  } catch (err) {
+    logger.warn(`countComposerDataKeys failed: ${String(err)}`);
+    return 0;
+  }
+}
+
+/** Load a single composer header by ID. */
+export function loadComposerHeaderById(
+  db: DbBackend,
+  composerId: string,
+  logger: Logger
+): ComposerHeader | null {
+  try {
+    const result = db.exec(
+      `SELECT key, value FROM cursorDiskKV WHERE key = ?`,
+      [`composerData:${composerId}`]
+    );
+    if (!result.length || !result[0].rows.length) {
       return null;
     }
-    let p = decodeURIComponent(url.pathname);
-    if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) {
-      p = p.slice(1);
+    const [key, rawValue] = result[0].rows[0] as [string, string | Uint8Array | null];
+    const str =
+      rawValue instanceof Uint8Array
+        ? Buffer.from(rawValue).toString('utf8')
+        : rawValue === null
+          ? null
+          : String(rawValue);
+    if (!str) {
+      return null;
     }
-    if (process.platform === 'win32') {
-      p = p.replace(/\//g, '\\');
-    }
-    return p;
-  } catch {
+    const parsed = JSON.parse(str) as Record<string, unknown>;
+    return parseComposerData(key, parsed, logger);
+  } catch (err) {
+    logger.warn(`loadComposerHeaderById(${composerId}): ${String(err)}`);
     return null;
   }
 }
@@ -464,7 +688,7 @@ function fileUriToFsPath(uri: string): string | null {
 export async function openGlobalStorageDb(
   globalStoragePath: string,
   logger: Logger
-): Promise<SqlDatabase | null> {
+): Promise<DbBackend | null> {
   const dbPath = path.join(globalStoragePath, 'state.vscdb');
 
   if (!fs.existsSync(dbPath)) {
@@ -472,10 +696,10 @@ export async function openGlobalStorageDb(
     return null;
   }
 
-  const sizeMB = (fs.statSync(dbPath).size / 1024 / 1024).toFixed(1);
-  logger.log(`Opening globalStorage DB (${sizeMB} MB): ${dbPath}`);
+  const bytes = getDatabaseSizeBytes(dbPath);
+  logger.log(`Opening globalStorage DB (${formatSizeMb(bytes)} MB): ${dbPath}`);
 
-  const db = await openDatabase(dbPath, logger);
+  const db = await openDatabaseBackend(dbPath, logger);
   if (!db) {
     return null;
   }

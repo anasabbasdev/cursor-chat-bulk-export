@@ -26,7 +26,7 @@ export function parseConversations(
     const type = classifyKey(record.key);
     logger.log(`[Legacy] Parsing record key="${record.key}" type="${type}"`);
     try {
-      const convs = parseRecord(record.key, parsed, storagePath, type, logger);
+      const convs = parseRecord(record.key, parsed, storagePath, type, logger, 0);
       logger.log(`  → extracted ${convs.length} conversation(s)`);
       conversations.push(...convs);
     } catch (err) {
@@ -42,16 +42,35 @@ export function parseConversations(
   });
 }
 
-function parseRecord(key: string, data: unknown, storagePath: string, sessionType: string, logger: Logger): Conversation[] {
-  if (!data || typeof data !== 'object') return [];
+const MAX_PARSE_DEPTH = 8;
+
+function parseRecord(
+  key: string,
+  data: unknown,
+  storagePath: string,
+  sessionType: string,
+  logger: Logger,
+  depth = 0
+): Conversation[] {
+  if (depth > MAX_PARSE_DEPTH || !data || typeof data !== 'object') {
+    return [];
+  }
   const obj = data as Record<string, unknown>;
 
-  if (Array.isArray(obj['tabs'])) return parseTabs(obj['tabs'] as unknown[], storagePath, sessionType, logger);
-  if (Array.isArray(obj['allComposers'])) return parseComposers(obj['allComposers'] as unknown[], storagePath, logger);
-  if (Array.isArray(obj['conversations'])) return parseConvArray(obj['conversations'] as unknown[], storagePath, sessionType, logger);
+  if (Array.isArray(obj['tabs'])) {
+    return parseTabs(obj['tabs'] as unknown[], storagePath, sessionType, logger);
+  }
+  if (Array.isArray(obj['allComposers'])) {
+    return parseComposers(obj['allComposers'] as unknown[], storagePath, logger);
+  }
+  if (Array.isArray(obj['conversations'])) {
+    return parseConvArray(obj['conversations'] as unknown[], storagePath, sessionType, logger);
+  }
   if (Array.isArray(data)) {
     const bubbles = extractBubbles(data, logger);
-    if (bubbles.length > 0) return [buildConv(key, null, null, null, bubbles, storagePath, sessionType, [])];
+    if (bubbles.length > 0) {
+      return [buildConv(key, null, null, null, bubbles, storagePath, sessionType, [])];
+    }
   }
   if (obj['id'] || obj['composerId'] || obj['tabId']) {
     const s = parseSingle(obj, storagePath, sessionType, logger);
@@ -59,8 +78,10 @@ function parseRecord(key: string, data: unknown, storagePath: string, sessionTyp
   }
   for (const [subKey, subVal] of Object.entries(obj)) {
     if (Array.isArray(subVal) && subVal.length > 0) {
-      const convs = parseRecord(key + '.' + subKey, subVal, storagePath, sessionType, logger);
-      if (convs.length > 0) return convs;
+      const convs = parseRecord(key + '.' + subKey, subVal, storagePath, sessionType, logger, depth + 1);
+      if (convs.length > 0) {
+        return convs;
+      }
     }
   }
   return [];

@@ -74,6 +74,8 @@ export interface Conversation {
   hasParseErrors?: boolean;
   /** Raw parse error messages for logging */
   parseErrors?: string[];
+  /** Header/message count before bubbles are loaded (deferred export) */
+  estimatedMessageCount?: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -143,7 +143,7 @@ The issue is in the `refreshToken` function…
 The `INDEX.md` shows per-conversation stats:
 
 ```markdown
-- [`2026-05-24__fix-login-session.md`](./2026-05-24__fix-login-session.md) — **Fix login session error** — 2026-05-24
+- 2026-05-24__fix-login-session.md — Fix login session error — 2026-05-24
   - Messages exported: 28, Internal filtered: 64
   - Roles: User 12, Assistant 16
 ```
@@ -156,7 +156,40 @@ If conversations are not found, open the **Cursor Chat Bulk Export** Output Chan
 
 - **View → Output** → select **Cursor Chat Bulk Export** from the dropdown
 
-Then run **Diagnose Current Workspace Chat Schema** for detailed per-conversation diagnostics.
+Then run **Diagnose Current Workspace Chat Schema** or **Diagnose Conversation Discovery** for detailed per-conversation diagnostics.
+
+### Diagnose Conversation Discovery
+
+Run **Cursor Chat Bulk Export: Diagnose Conversation Discovery** to explain why export count may differ from Cursor UI (e.g. 47 in UI vs 5 exported).
+
+The report is written to:
+
+`.cursor-chat-export/diagnostics/conversation-discovery-report.md`
+
+It includes DB sizes, table row counts, suspicious key patterns, composer counts before/after workspace filter, dedupe stats, and a mismatch case (A/B/C/D).
+
+**Raw Discovery Mode** lists every candidate record (parsed or not) so you can see if missing chats are found but not parsed.
+
+### Workspace matching (moved projects)
+
+Setting `cursorChatExport.includePossibleWorkspaceMatches` (default `true`) matches conversations when the folder name matches even if the full path changed (e.g. `c:\wamp64\www\Newgwireless` vs `c:\laragon\www\Newgwireless`).
+
+### Reading storage from an old PC copy (`D:\Cursor`)
+
+If you copied Cursor data from another machine (e.g. `D:\Cursor\User`), set in VS Code/Cursor settings:
+
+```json
+"cursorChatExport.cursorUserDataPath": "D:\\Cursor\\User"
+```
+
+Or set environment variable `CURSOR_APPDATA` to the parent folder that contains `User\globalStorage` and `User\workspaceStorage`.
+
+The copied folder should eventually contain:
+
+- `User\globalStorage\state.vscdb` — main chat database (can be 2+ GB)
+- `User\workspaceStorage\<hash>\` — per-workspace metadata
+
+**Diagnose Conversation Discovery** uses a lightweight scan on large DBs (counts + sample keys only) so it does not crash with "Maximum call stack size exceeded".
 
 ---
 
@@ -184,6 +217,25 @@ src/
 └── ui/
     └── commands.ts           Register commands + QuickPick + export pipeline
 ```
+
+---
+
+## Large databases (over ~2 GB)
+
+Cursor's `globalStorage/state.vscdb` can grow very large (2+ GB). The built-in sql.js reader cannot open files that large.
+
+The extension automatically uses the **sqlite3 command-line tool** when the global database exceeds ~1.85 GB.
+
+### Windows setup (required on machines with huge chat history)
+
+1. Install SQLite tools (pick one):
+   - `winget install SQLite.SQLite`
+   - Or download [sqlite-tools-win-x64.zip](https://www.sqlite.org/download.html), extract `sqlite3.exe`
+2. Either add `sqlite3` to your PATH, **or** copy `sqlite3.exe` into the extension's `out/` folder next to `extension.js`:
+   - Dev: `MDCursorExporter/out/sqlite3.exe`
+   - Installed: `%USERPROFILE%\.cursor\extensions\anasabbascode.cursor-chat-bulk-export-<version>\out\sqlite3.exe`
+
+After installing, run export again. The Output Channel should show: `Opened DB via cli`.
 
 ---
 

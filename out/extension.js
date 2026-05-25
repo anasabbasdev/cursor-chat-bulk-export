@@ -593,15 +593,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs8 = require("node:fs");
+          var fs11 = require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs8.readFileSync(a);
+            return fs11.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs8.readFileSync(a, void 0);
+            return fs11.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -909,7 +909,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs8.readSync(d, b, 0, 256);
+                  c = fs11.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2407,7 +2407,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode2 = __toESM(require("vscode"));
+var vscode3 = __toESM(require("vscode"));
 
 // src/logger.ts
 function createLogger(channel) {
@@ -2430,15 +2430,28 @@ function createLogger(channel) {
 }
 
 // src/ui/commands.ts
-var vscode = __toESM(require("vscode"));
-var path7 = __toESM(require("path"));
-var fs7 = __toESM(require("fs"));
+var vscode2 = __toESM(require("vscode"));
+var path11 = __toESM(require("path"));
+var fs10 = __toESM(require("fs"));
 
 // src/storage/cursorStorage.ts
 var os = __toESM(require("os"));
 var path = __toESM(require("path"));
 var fs = __toESM(require("fs"));
+var vscode = __toESM(require("vscode"));
 function getCursorUserDataPath(logger) {
+  try {
+    const setting = vscode.workspace.getConfiguration("cursorChatExport").get("cursorUserDataPath", "").trim();
+    if (setting) {
+      const resolved = path.resolve(setting);
+      if (fs.existsSync(resolved)) {
+        logger.log(`Using cursorChatExport.cursorUserDataPath: ${resolved}`);
+        return resolved;
+      }
+      logger.warn(`cursorUserDataPath not found: ${resolved}`);
+    }
+  } catch {
+  }
   const override = process.env["CURSOR_APPDATA"];
   if (override) {
     logger.log(`Using CURSOR_APPDATA override: ${override}`);
@@ -2566,7 +2579,8 @@ function fileUriToFsPath(uri) {
     return uri.replace(/^file:\/\//, "").replace(/\//g, process.platform === "win32" ? "\\" : "/");
   }
 }
-function findMatchingEntries(entries, targetWorkspacePath, logger) {
+function findMatchingEntries(entries, targetWorkspacePath, logger, options) {
+  const includeByFolderName = options?.includeByFolderName !== false;
   const normalise = (p) => {
     let n = p.trim().replace(/[\\/]+$/, "");
     if (process.platform === "win32") {
@@ -2575,30 +2589,241 @@ function findMatchingEntries(entries, targetWorkspacePath, logger) {
     return n;
   };
   const target = normalise(targetWorkspacePath);
+  const folderName = path2.basename(target).toLowerCase();
   const matches = entries.filter((e) => {
     if (!e.workspacePath) {
       return false;
     }
-    return normalise(e.workspacePath) === target;
+    const p = normalise(e.workspacePath);
+    if (p === target) {
+      return true;
+    }
+    if (p.endsWith("\\" + folderName) || p.endsWith("/" + folderName)) {
+      return true;
+    }
+    if (includeByFolderName && path2.basename(p).toLowerCase() === folderName) {
+      return true;
+    }
+    return false;
   });
-  logger.log(`Workspace match: ${matches.length} entries match "${targetWorkspacePath}"`);
+  logger.log(
+    `Workspace match: ${matches.length} storage entries for "${targetWorkspacePath}"` + (includeByFolderName ? ` (incl. folder name "${folderName}")` : " (exact path only)")
+  );
   return matches;
+}
+function normaliseWorkspacePath(p) {
+  let n = p.trim().replace(/[\\/]+$/, "");
+  if (process.platform === "win32") {
+    n = n.toLowerCase().replace(/\//g, "\\");
+  }
+  return n;
+}
+function dbSizeBytes(entry) {
+  if (!entry.dbPath) {
+    return 0;
+  }
+  try {
+    return fs2.statSync(entry.dbPath).size;
+  } catch {
+    return 0;
+  }
+}
+function selectPrimaryWorkspaceStorageEntry(entries, targetWorkspacePath, logger) {
+  const target = normaliseWorkspacePath(targetWorkspacePath);
+  const withDb = entries.filter((e) => e.dbPath);
+  if (withDb.length === 0) {
+    return null;
+  }
+  const exact = withDb.filter(
+    (e) => e.workspacePath && normaliseWorkspacePath(e.workspacePath) === target
+  );
+  const pool = exact.length > 0 ? exact : withDb;
+  const sorted = [...pool].sort((a, b) => dbSizeBytes(b) - dbSizeBytes(a));
+  const primary = sorted[0];
+  logger.log(
+    `Primary workspace storage: [${primary.hash}] ${primary.workspacePath ?? "(unknown)"} (${(dbSizeBytes(primary) / 1024 / 1024).toFixed(1)} MB)` + (exact.length > 0 ? " (exact path)" : " (folder-name fallback)")
+  );
+  return primary;
 }
 
 // src/storage/cursorDiskKV.ts
-var fs4 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
+
+// src/storage/dbBackend.ts
+var fs3 = __toESM(require("fs"));
+var SQLJS_MAX_BYTES = Math.floor(1.85 * 1024 * 1024 * 1024);
+var SqlJsBackend = class {
+  constructor(db) {
+    this.db = db;
+    this.kind = "sqljs";
+  }
+  exec(sql, params) {
+    const raw = this.db.exec(sql, params ?? []);
+    return raw.map((r) => ({
+      columns: r.columns,
+      rows: r.values
+    }));
+  }
+  close() {
+    try {
+      this.db.close();
+    } catch {
+    }
+  }
+};
+function wrapSqlJs(db) {
+  return new SqlJsBackend(db);
+}
+function getDatabaseSizeBytes(dbPath) {
+  try {
+    return fs3.statSync(dbPath).size;
+  } catch {
+    return 0;
+  }
+}
+function formatSizeMb(bytes) {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+function isTooLargeForSqlJs(bytes) {
+  return bytes >= SQLJS_MAX_BYTES;
+}
+function logOpenStrategy(dbPath, bytes, kind, logger) {
+  logger.log(
+    `Opened DB via ${kind} (${formatSizeMb(bytes)} MB): ${dbPath}` + (kind === "cli" ? " \u2014 sqlite3 CLI (large file)" : "")
+  );
+}
 
 // src/storage/sqliteReader.ts
-var fs3 = __toESM(require("fs"));
+var fs5 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
+
+// src/storage/sqliteCliReader.ts
+var import_child_process = require("child_process");
+var fs4 = __toESM(require("fs"));
 var path3 = __toESM(require("path"));
+var MAX_BUFFER = 512 * 1024 * 1024;
+function findSqlite3Executable(logger) {
+  const isWin = process.platform === "win32";
+  const ext = isWin ? ".exe" : "";
+  const bundled = path3.join(__dirname, `sqlite3${ext}`);
+  const candidates = [
+    bundled,
+    "sqlite3",
+    isWin ? "sqlite3.exe" : "sqlite3"
+  ];
+  for (const exe of candidates) {
+    if (exe !== "sqlite3" && exe !== "sqlite3.exe" && !fs4.existsSync(exe)) {
+      continue;
+    }
+    try {
+      const r = (0, import_child_process.spawnSync)(exe, ["-version"], {
+        encoding: "utf8",
+        timeout: 8e3,
+        windowsHide: true
+      });
+      if (r.status === 0 || r.stdout && r.stdout.includes("SQLite")) {
+        logger.log(`Using sqlite3 CLI: ${exe}`);
+        return exe;
+      }
+    } catch {
+    }
+  }
+  logger.warn(
+    `sqlite3 command-line tool not found. For databases over 2 GB, install SQLite tools from https://www.sqlite.org/download.html (place sqlite3${ext} next to the extension in the out/ folder), or run: winget install SQLite.SQLite`
+  );
+  return null;
+}
+var CliBackend = class {
+  constructor(dbPath, sqlite3Path) {
+    this.dbPath = dbPath;
+    this.sqlite3Path = sqlite3Path;
+    this.kind = "cli";
+  }
+  exec(sql, params) {
+    const bound = bindParams(sql, params ?? []);
+    return runSqlite3Json(this.sqlite3Path, this.dbPath, bound);
+  }
+  close() {
+  }
+};
+function openCliBackend(dbPath, sqlite3Path) {
+  return new CliBackend(dbPath, sqlite3Path);
+}
+function bindParams(sql, params) {
+  let i = 0;
+  return sql.replace(/\?/g, () => {
+    if (i >= params.length) {
+      return "''";
+    }
+    const v = params[i++];
+    return `'${String(v).replace(/'/g, "''")}'`;
+  });
+}
+function runSqlite3Json(sqlite3Path, dbPath, sql) {
+  const args = ["-readonly", "-json", dbPath, sql];
+  const result = (0, import_child_process.spawnSync)(sqlite3Path, args, {
+    encoding: "utf8",
+    maxBuffer: MAX_BUFFER,
+    windowsHide: true,
+    timeout: 6e5
+    // 10 min for huge DBs
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const err = (result.stderr || result.stdout || "sqlite3 failed").trim();
+    throw new Error(err);
+  }
+  const out = (result.stdout || "").trim();
+  if (!out) {
+    return [];
+  }
+  const parsed = JSON.parse(out);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return [];
+  }
+  const columns = Object.keys(parsed[0]);
+  const rows = parsed.map((row) => columns.map((col) => row[col]));
+  return [{ columns, rows }];
+}
+function buildComposerFilterSql(workspacePath, storageHashes) {
+  const conditions = [];
+  const pathNorm = workspacePath.replace(/\\/g, "/").toLowerCase();
+  const pathWin = workspacePath.replace(/\//g, "\\").toLowerCase();
+  const base = path3.basename(workspacePath).toLowerCase();
+  for (const frag of [pathNorm, pathWin, base]) {
+    if (frag.length >= 4) {
+      conditions.push(
+        `instr(lower(CAST(value AS TEXT)), '${escapeSqlLiteral(frag)}') > 0`
+      );
+    }
+  }
+  for (const hash of storageHashes) {
+    if (hash) {
+      conditions.push(
+        `instr(CAST(value AS TEXT), '${escapeSqlLiteral(hash)}') > 0`
+      );
+    }
+  }
+  if (conditions.length === 0) {
+    return `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`;
+  }
+  return `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND (` + conditions.join(" OR ") + `)`;
+}
+function escapeSqlLiteral(s) {
+  return s.replace(/'/g, "''");
+}
+
+// src/storage/sqliteReader.ts
 var sqlJsPromise = null;
 async function getSqlJs(logger) {
   if (!sqlJsPromise) {
     sqlJsPromise = (async () => {
-      const wasmPath = path3.join(__dirname, "sql-wasm.wasm");
+      const wasmPath = path4.join(__dirname, "sql-wasm.wasm");
       logger.log(`Loading sql-wasm.wasm from: ${wasmPath}`);
-      if (!fs3.existsSync(wasmPath)) {
+      if (!fs5.existsSync(wasmPath)) {
         throw new Error(
           `sql-wasm.wasm not found at ${wasmPath}. Run 'npm run compile' to copy it into the out/ directory.`
         );
@@ -2624,12 +2849,19 @@ async function openDatabase(dbPath, logger) {
   if (!SQL) {
     return null;
   }
-  if (!fs3.existsSync(dbPath)) {
+  if (!fs5.existsSync(dbPath)) {
     logger.warn(`Database file not found: ${dbPath}`);
     return null;
   }
+  const bytes = getDatabaseSizeBytes(dbPath);
+  if (isTooLargeForSqlJs(bytes)) {
+    logger.warn(
+      `Database is ${formatSizeMb(bytes)} MB \u2014 exceeds sql.js limit (~1.85 GB). Use sqlite3 CLI fallback for this file.`
+    );
+    return null;
+  }
   try {
-    const fileBuffer = fs3.readFileSync(dbPath);
+    const fileBuffer = fs5.readFileSync(dbPath);
     const db = new SQL.Database(fileBuffer);
     logger.log(`Opened DB (in-memory, read-only): ${dbPath}`);
     return db;
@@ -2638,29 +2870,54 @@ async function openDatabase(dbPath, logger) {
     return null;
   }
 }
-function closeDatabase(db, logger) {
-  if (!db) {
-    return;
+async function openDatabaseBackend(dbPath, logger) {
+  if (!fs5.existsSync(dbPath)) {
+    logger.warn(`Database file not found: ${dbPath}`);
+    return null;
   }
-  try {
+  const bytes = getDatabaseSizeBytes(dbPath);
+  if (isTooLargeForSqlJs(bytes)) {
+    const sqlite3Path2 = findSqlite3Executable(logger);
+    if (!sqlite3Path2) {
+      logger.error(
+        `Cannot open ${formatSizeMb(bytes)} MB database without sqlite3 CLI. Install SQLite from https://www.sqlite.org/download.html or: winget install SQLite.SQLite`
+      );
+      return null;
+    }
+    logOpenStrategy(dbPath, bytes, "cli", logger);
+    return openCliBackend(dbPath, sqlite3Path2);
+  }
+  const sqlJsDb = await openDatabase(dbPath, logger);
+  if (sqlJsDb) {
+    logOpenStrategy(dbPath, bytes, "sqljs", logger);
+    return wrapSqlJs(sqlJsDb);
+  }
+  const sqlite3Path = findSqlite3Executable(logger);
+  if (sqlite3Path) {
+    logger.warn("sql.js open failed; trying sqlite3 CLI fallback.");
+    logOpenStrategy(dbPath, bytes, "cli", logger);
+    return openCliBackend(dbPath, sqlite3Path);
+  }
+  return null;
+}
+function closeDatabaseBackend(db, _logger) {
+  if (db) {
     db.close();
-  } catch (err) {
-    logger.warn(`Error closing database: ${String(err)}`);
   }
 }
-function listTables(db, logger) {
+function listTablesBackend(db, logger) {
   const tables = [];
   try {
     const result = db.exec(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`);
-    if (!result.length || !result[0].values.length) {
+    if (!result.length || !result[0].rows.length) {
       logger.log("No tables found in DB.");
       return tables;
     }
-    const names = result[0].values.map((row) => String(row[0]));
+    const names = result[0].rows.map((row) => String(row[0]));
     for (const name of names) {
       try {
         const pragmaResult = db.exec(`PRAGMA table_info(${JSON.stringify(name)})`);
-        const columns = pragmaResult.length ? pragmaResult[0].values.map((row) => String(row[1])) : [];
+        const columns = pragmaResult.length ? pragmaResult[0].rows.map((row) => String(row[1])) : [];
         tables.push({ name, columns });
       } catch {
         tables.push({ name, columns: [] });
@@ -2672,14 +2929,33 @@ function listTables(db, logger) {
   logger.log(`Tables in DB: ${tables.map((t) => t.name).join(", ") || "(none)"}`);
   return tables;
 }
-function readItemTable(db, logger, tableName = "ItemTable") {
+function buildChatKeySqlWhere(keyColumn = "key") {
+  const terms = [
+    "composer",
+    "chat",
+    "conversation",
+    "agent",
+    "bubble",
+    "message",
+    "tabs",
+    "workbench",
+    "aichat",
+    "cursor",
+    "thread",
+    "session",
+    "archive",
+    "history"
+  ];
+  return terms.map((t) => `lower(${keyColumn}) LIKE '%${t}%'`).join(" OR ");
+}
+function readItemTableBackend(db, logger, tableName = "ItemTable") {
   try {
     const result = db.exec(`SELECT key, value FROM ${JSON.stringify(tableName)}`);
     if (!result.length) {
       logger.log(`Table "${tableName}" is empty or does not exist.`);
       return [];
     }
-    const rows = result[0].values.map((row) => ({
+    const rows = result[0].rows.map((row) => ({
       key: String(row[0] ?? ""),
       value: row[1] instanceof Uint8Array ? Buffer.from(row[1]) : row[1] === null ? null : String(row[1])
     }));
@@ -2690,24 +2966,130 @@ function readItemTable(db, logger, tableName = "ItemTable") {
     return [];
   }
 }
+function safeParseValue(value) {
+  if (value === null || value === void 0) {
+    return null;
+  }
+  const str = Buffer.isBuffer(value) ? value.toString("utf8") : value;
+  try {
+    return JSON.parse(str);
+  } catch {
+    return str;
+  }
+}
+
+// src/workspace/workspaceMatch.ts
+var path5 = __toESM(require("path"));
+function normaliseWsPath(p) {
+  let n = p.replace(/[\\/]+$/, "").trim();
+  if (process.platform === "win32") {
+    n = n.toLowerCase().replace(/\//g, "\\");
+  }
+  return n;
+}
+function workspaceFolderName(workspacePath) {
+  return path5.basename(normaliseWsPath(workspacePath)).toLowerCase();
+}
+function fileUriToFsPath2(uri) {
+  try {
+    const url = new URL(uri);
+    if (url.protocol !== "file:") {
+      return null;
+    }
+    let p = decodeURIComponent(url.pathname);
+    if (process.platform === "win32" && /^\/[A-Za-z]:/.test(p)) {
+      p = p.slice(1);
+    }
+    if (process.platform === "win32") {
+      p = p.replace(/\//g, "\\");
+    }
+    return p;
+  } catch {
+    return null;
+  }
+}
+function pathEndsWithFolder(storedPath, targetPath) {
+  const s = normaliseWsPath(storedPath);
+  const t = normaliseWsPath(targetPath);
+  return s === t || s.endsWith("\\" + t) || s.endsWith("/" + t) || t.endsWith("\\" + s) || t.endsWith("/" + s);
+}
+function uriContainsFolderName(uri, folderName) {
+  if (!folderName || folderName.length < 2) {
+    return false;
+  }
+  return decodeURIComponent(uri).toLowerCase().includes(folderName);
+}
+function composerMatchesWorkspace(composer, options) {
+  const normTarget = normaliseWsPath(options.workspacePath);
+  const hashSet = new Set(options.storageHashes.map((h) => h.toLowerCase()));
+  const folderName = workspaceFolderName(options.workspacePath);
+  if (composer.workspaceFsPath) {
+    const stored = normaliseWsPath(composer.workspaceFsPath);
+    if (stored === normTarget) {
+      return true;
+    }
+    if (pathEndsWithFolder(stored, normTarget)) {
+      return true;
+    }
+    if (options.includePossibleByFolderName) {
+      if (path5.basename(stored).toLowerCase() === folderName) {
+        return true;
+      }
+    }
+  }
+  if (composer.workspaceExternalUri) {
+    const decoded = fileUriToFsPath2(composer.workspaceExternalUri);
+    if (decoded) {
+      const stored = normaliseWsPath(decoded);
+      if (stored === normTarget || pathEndsWithFolder(stored, normTarget)) {
+        return true;
+      }
+      if (options.includePossibleByFolderName && path5.basename(stored).toLowerCase() === folderName) {
+        return true;
+      }
+    }
+    if (options.includePossibleByFolderName && uriContainsFolderName(composer.workspaceExternalUri, folderName)) {
+      return true;
+    }
+  }
+  if (composer.workspaceStorageId && hashSet.has(composer.workspaceStorageId.toLowerCase())) {
+    return true;
+  }
+  return false;
+}
+function filterComposersByWorkspace(composers, options, logger) {
+  const matches = composers.filter((c) => composerMatchesWorkspace(c, options));
+  logger.log(
+    `Workspace filter: ${matches.length}/${composers.length} composers match "${options.workspacePath}"` + (options.includePossibleByFolderName ? " (incl. folder-name matches)" : " (strict path only)") + (options.storageHashes.length > 0 ? ` hashes: ${options.storageHashes.join(", ")}` : "")
+  );
+  return matches;
+}
 
 // src/storage/cursorDiskKV.ts
 function hasCursorDiskKV(db, logger) {
-  const tables = listTables(db, logger);
+  const tables = listTablesBackend(db, logger);
   return tables.some((t) => t.name === "cursorDiskKV");
 }
-function readAllComposerHeaders(db, logger) {
+function readAllComposerHeaders(db, logger, workspaceFilter) {
   const headers = [];
-  try {
-    const result = db.exec(
-      `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`
+  let sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`;
+  if (workspaceFilter?.useSqlPrefilter && db.kind === "cli") {
+    sql = buildComposerFilterSql(
+      workspaceFilter.workspacePath,
+      workspaceFilter.storageHashes
     );
-    if (!result.length || !result[0].values.length) {
+    logger.warn(
+      "Using SQL workspace prefilter on large DB \u2014 may miss archived/moved conversations. Disable useSqlPrefilter for full discovery."
+    );
+  }
+  try {
+    const result = db.exec(sql);
+    if (!result.length || !result[0].rows.length) {
       logger.log("No composerData entries found in cursorDiskKV");
       return headers;
     }
-    logger.log(`Found ${result[0].values.length} composerData entries`);
-    for (const [key, rawValue] of result[0].values) {
+    logger.log(`Found ${result[0].rows.length} composerData entries`);
+    for (const [key, rawValue] of result[0].rows) {
       try {
         const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
         if (!str) {
@@ -2727,6 +3109,110 @@ function readAllComposerHeaders(db, logger) {
   }
   logger.log(`Parsed ${headers.length} composer headers`);
   return headers;
+}
+function readComposerHeadersForWorkspace(db, workspacePath, storageHashes, logger) {
+  const totalInDb = countComposerDataKeys(db, logger);
+  let sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'`;
+  const useSqlFilter = db.kind === "cli" || totalInDb > 800;
+  if (useSqlFilter) {
+    sql = buildComposerFilterSql(workspacePath, storageHashes);
+    logger.log(
+      `Loading composerData with workspace SQL filter (${totalInDb} total in DB, backend=${db.kind})`
+    );
+  } else {
+    logger.log(`Loading all ${totalInDb} composerData rows (small DB)`);
+  }
+  const headers = [];
+  try {
+    const result = db.exec(sql);
+    if (!result.length || !result[0].rows.length) {
+      logger.log("No composerData rows for workspace filter");
+      return { headers, totalInDb, usedSqlPrefilter: useSqlFilter };
+    }
+    logger.log(`composerData rows returned by query: ${result[0].rows.length}`);
+    for (const [key, rawValue] of result[0].rows) {
+      try {
+        const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
+        if (!str || str.length > 2e7) {
+          continue;
+        }
+        const parsed = JSON.parse(str);
+        const header = parseComposerData(key, parsed, logger);
+        if (header) {
+          headers.push(header);
+        }
+      } catch (err) {
+        const msg = String(err);
+        if (!msg.includes("Maximum call stack")) {
+          logger.warn(`Failed to parse composerData "${key}": ${msg}`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.error("readComposerHeadersForWorkspace failed", err);
+  }
+  logger.log(`Parsed ${headers.length} composer headers from workspace query`);
+  return { headers, totalInDb, usedSqlPrefilter: useSqlFilter };
+}
+function readComposerHeadersBatch(db, logger, offset, limit) {
+  const headers = [];
+  const sql = `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' LIMIT ${limit} OFFSET ${offset}`;
+  try {
+    const result = db.exec(sql);
+    if (!result.length) {
+      return headers;
+    }
+    for (const [key, rawValue] of result[0].rows) {
+      try {
+        const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
+        if (!str || str.length > 15e6) {
+          continue;
+        }
+        const parsed = JSON.parse(str);
+        const header = parseComposerData(key, parsed, logger);
+        if (header) {
+          headers.push(header);
+        }
+      } catch {
+      }
+    }
+  } catch (err) {
+    logger.warn(`Batch offset=${offset} failed: ${String(err)}`);
+  }
+  return headers;
+}
+function discoverComposersExhaustive(db, workspacePath, storageHashes, logger, includePossibleByFolderName, initial) {
+  const seen = new Set(initial.map((c) => c.composerId));
+  const merged = [...initial];
+  const batchSize = 150;
+  const maxBatches = 80;
+  logger.log(
+    `Batch scan: starting with ${initial.length} from SQL filter, scanning up to ${maxBatches * batchSize} rows\u2026`
+  );
+  for (let b = 0; b < maxBatches; b++) {
+    const batch = readComposerHeadersBatch(db, logger, b * batchSize, batchSize);
+    if (batch.length === 0) {
+      break;
+    }
+    const matched = filterComposersByWorkspace2(
+      batch,
+      workspacePath,
+      logger,
+      storageHashes,
+      includePossibleByFolderName
+    );
+    for (const c of matched) {
+      if (!seen.has(c.composerId)) {
+        seen.add(c.composerId);
+        merged.push(c);
+      }
+    }
+    if (b % 10 === 0) {
+      logger.log(`  batch ${b + 1}: scanned ${(b + 1) * batchSize}, merged total ${merged.length}`);
+    }
+  }
+  logger.log(`Batch scan complete: ${merged.length} composers for workspace`);
+  return merged;
 }
 function parseComposerData(key, data, logger) {
   const composerId = stringField(data, "composerId");
@@ -2783,37 +3269,62 @@ function parseComposerData(key, data, logger) {
     headers: parsedHeaders
   };
 }
-function loadBubblesForComposer(db, composerId, logger) {
+var BUBBLE_LOAD_CHUNK = 40;
+function loadBubblesForComposer(db, composerId, logger, bubbleIds) {
   const map = /* @__PURE__ */ new Map();
   try {
+    const uniqueIds = [...new Set((bubbleIds ?? []).filter((id) => id.length > 0))];
+    if (uniqueIds.length > 0) {
+      const t0 = Date.now();
+      for (let offset = 0; offset < uniqueIds.length; offset += BUBBLE_LOAD_CHUNK) {
+        const chunk = uniqueIds.slice(offset, offset + BUBBLE_LOAD_CHUNK);
+        const keys = chunk.map((b) => `'${escapeSqlKey(`bubbleId:${composerId}:${b}`)}'`).join(",");
+        const result2 = db.exec(
+          `SELECT key, value FROM cursorDiskKV WHERE key IN (${keys})`
+        );
+        if (result2.length) {
+          parseBubbleRows(result2[0].rows, composerId, map, logger);
+        }
+      }
+      logger.log(
+        `Loaded ${map.size}/${uniqueIds.length} bubble(s) for ${composerId} in ${Date.now() - t0}ms (header-scoped)`
+      );
+      return map;
+    }
     const result = db.exec(
       `SELECT key, value FROM cursorDiskKV WHERE key LIKE ?`,
       [`bubbleId:${composerId}:%`]
     );
-    if (!result.length || !result[0].values.length) {
+    if (!result.length || !result[0].rows.length) {
       logger.log(`No bubble records found for composer ${composerId}`);
       return map;
     }
-    logger.log(`Loading ${result[0].values.length} bubbles for composer ${composerId}`);
-    for (const [key, rawValue] of result[0].values) {
-      try {
-        const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
-        if (!str) {
-          continue;
-        }
-        const parsed = JSON.parse(str);
-        const bubble = parseBubbleContent(composerId, parsed);
-        if (bubble) {
-          map.set(bubble.bubbleId, bubble);
-        }
-      } catch (err) {
-        logger.warn(`Failed to parse bubble "${key}": ${String(err)}`);
-      }
-    }
+    logger.log(`Loading ${result[0].rows.length} bubbles for composer ${composerId} (full LIKE scan)`);
+    parseBubbleRows(result[0].rows, composerId, map, logger);
   } catch (err) {
     logger.error(`Failed to load bubbles for composer ${composerId}`, err);
   }
   return map;
+}
+function escapeSqlKey(key) {
+  return key.replace(/'/g, "''");
+}
+function parseBubbleRows(rows, composerId, map, logger) {
+  for (const [key, rawValue] of rows) {
+    try {
+      const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
+      if (!str) {
+        continue;
+      }
+      const parsed = JSON.parse(str);
+      const bubble = parseBubbleContent(composerId, parsed);
+      if (bubble) {
+        map.set(bubble.bubbleId, bubble);
+      }
+    } catch (err) {
+      logger.warn(`Failed to parse bubble "${key}": ${String(err)}`);
+    }
+  }
 }
 function parseBubbleContent(composerId, data) {
   const bubbleId = stringField(data, "bubbleId");
@@ -2849,11 +3360,15 @@ function extractTextFromLexicalJson(richTextJson) {
     return "";
   }
 }
-function collectLexicalText(node, parts) {
-  if (!node || typeof node !== "object") {
+function collectLexicalText(node, parts, visited = /* @__PURE__ */ new WeakSet(), depth = 0) {
+  if (!node || typeof node !== "object" || depth > 32) {
     return;
   }
   const n = node;
+  if (visited.has(n)) {
+    return;
+  }
+  visited.add(n);
   if (n["type"] === "text" && typeof n["text"] === "string") {
     parts.push(n["text"]);
     return;
@@ -2865,7 +3380,7 @@ function collectLexicalText(node, parts) {
   const children = n["children"];
   if (Array.isArray(children)) {
     for (const child of children) {
-      collectLexicalText(child, parts);
+      collectLexicalText(child, parts, visited, depth + 1);
     }
     if (n["type"] === "paragraph" || n["type"] === "heading") {
       parts.push("\n");
@@ -2873,66 +3388,63 @@ function collectLexicalText(node, parts) {
   }
   const rootNode = n["root"];
   if (rootNode) {
-    collectLexicalText(rootNode, parts);
+    collectLexicalText(rootNode, parts, visited, depth + 1);
   }
 }
-function filterComposersByWorkspace(composers, workspacePath, logger, workspaceStorageHashes = []) {
-  const normTarget = normaliseWsPath(workspacePath);
-  const hashSet = new Set(workspaceStorageHashes.map((h) => h.toLowerCase()));
-  const matches = composers.filter((c) => {
-    if (c.workspaceFsPath && normaliseWsPath(c.workspaceFsPath) === normTarget) {
-      return true;
-    }
-    if (c.workspaceExternalUri) {
-      const decoded = fileUriToFsPath2(c.workspaceExternalUri);
-      if (decoded && normaliseWsPath(decoded) === normTarget) {
-        return true;
-      }
-    }
-    if (c.workspaceStorageId && hashSet.has(c.workspaceStorageId.toLowerCase())) {
-      return true;
-    }
-    return false;
-  });
-  logger.log(
-    `Workspace filter: ${matches.length}/${composers.length} composers match "${workspacePath}"` + (workspaceStorageHashes.length > 0 ? ` (hashes: ${workspaceStorageHashes.join(", ")})` : "")
-  );
-  return matches;
+function filterComposersByWorkspace2(composers, workspacePath, logger, workspaceStorageHashes = [], includePossibleByFolderName = true) {
+  const options = {
+    workspacePath,
+    storageHashes: workspaceStorageHashes,
+    includePossibleByFolderName
+  };
+  return filterComposersByWorkspace(composers, options, logger);
 }
-function normaliseWsPath(p) {
-  let n = p.replace(/[\\/]+$/, "").trim();
-  if (process.platform === "win32") {
-    n = n.toLowerCase().replace(/\//g, "\\");
-  }
-  return n;
-}
-function fileUriToFsPath2(uri) {
+function countComposerDataKeys(db, logger) {
   try {
-    const url = new URL(uri);
-    if (url.protocol !== "file:") {
+    const r = db.exec(
+      `SELECT COUNT(*) FROM cursorDiskKV WHERE key LIKE 'composerData:%'`
+    );
+    if (!r.length || !r[0].rows.length) {
+      return 0;
+    }
+    const n = Number(r[0].rows[0][0]);
+    logger.log(`Total composerData:* keys in DB: ${n}`);
+    return n;
+  } catch (err) {
+    logger.warn(`countComposerDataKeys failed: ${String(err)}`);
+    return 0;
+  }
+}
+function loadComposerHeaderById(db, composerId, logger) {
+  try {
+    const result = db.exec(
+      `SELECT key, value FROM cursorDiskKV WHERE key = ?`,
+      [`composerData:${composerId}`]
+    );
+    if (!result.length || !result[0].rows.length) {
       return null;
     }
-    let p = decodeURIComponent(url.pathname);
-    if (process.platform === "win32" && /^\/[A-Za-z]:/.test(p)) {
-      p = p.slice(1);
+    const [key, rawValue] = result[0].rows[0];
+    const str = rawValue instanceof Uint8Array ? Buffer.from(rawValue).toString("utf8") : rawValue === null ? null : String(rawValue);
+    if (!str) {
+      return null;
     }
-    if (process.platform === "win32") {
-      p = p.replace(/\//g, "\\");
-    }
-    return p;
-  } catch {
+    const parsed = JSON.parse(str);
+    return parseComposerData(key, parsed, logger);
+  } catch (err) {
+    logger.warn(`loadComposerHeaderById(${composerId}): ${String(err)}`);
     return null;
   }
 }
 async function openGlobalStorageDb(globalStoragePath, logger) {
-  const dbPath = path4.join(globalStoragePath, "state.vscdb");
-  if (!fs4.existsSync(dbPath)) {
+  const dbPath = path6.join(globalStoragePath, "state.vscdb");
+  if (!fs6.existsSync(dbPath)) {
     logger.warn(`globalStorage DB not found: ${dbPath}`);
     return null;
   }
-  const sizeMB = (fs4.statSync(dbPath).size / 1024 / 1024).toFixed(1);
-  logger.log(`Opening globalStorage DB (${sizeMB} MB): ${dbPath}`);
-  const db = await openDatabase(dbPath, logger);
+  const bytes = getDatabaseSizeBytes(dbPath);
+  logger.log(`Opening globalStorage DB (${formatSizeMb(bytes)} MB): ${dbPath}`);
+  const db = await openDatabaseBackend(dbPath, logger);
   if (!db) {
     return null;
   }
@@ -2959,32 +3471,184 @@ function numberField(obj, key) {
   return null;
 }
 
-// src/chat/schemaDiscovery.ts
-var CHAT_KEY_PATTERNS = [
-  /composer/i,
-  /aichat/i,
-  /aiService/i,
-  /chatdata/i,
-  /cursor\.chat/i,
-  /cursor\.composer/i,
-  /cursor\.agent/i,
-  /chatHistory/i,
-  /conversationHistory/i,
-  /bubbleId/i,
-  /tabs/i
-  // composer stores tabs array
+// src/discovery/conversationDiscovery.ts
+var path8 = __toESM(require("path"));
+
+// src/chat/itemTableDiscovery.ts
+var SESSION_INDEX_KEY = /^chat\.chatsessionstore\.index$/i;
+var COMPOSER_DATA_KEY = /^composer\.composerdata$/i;
+var SESSION_INDEX_PATTERNS = [
+  SESSION_INDEX_KEY,
+  COMPOSER_DATA_KEY
 ];
-function filterChatRecords(records, logger) {
-  const chatRecords = records.filter(
-    (r) => CHAT_KEY_PATTERNS.some((p) => p.test(r.key))
-  );
-  logger.log(
-    `filterChatRecords: ${chatRecords.length}/${records.length} records match chat key patterns`
-  );
-  if (chatRecords.length > 0) {
-    logger.log(`  Matched keys: ${chatRecords.map((r) => r.key).join(", ")}`);
+function extractComposerIdsFromPaneKeys(db, logger) {
+  const rows = readItemTableBackend(db, logger, "ItemTable");
+  const ids = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    const k = row.key;
+    if (/^workbench\.panel\.composerChatViewPane\.[0-9a-f-]{36}$/i.test(k)) {
+      const parsed = safeParseValue(row.value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const subKey of Object.keys(parsed)) {
+          const m = subKey.match(
+            /workbench\.panel\.aichat\.view\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+          );
+          if (m) {
+            ids.add(m[1]);
+          }
+        }
+      }
+      continue;
+    }
+    const m2 = k.match(
+      /^workbench\.panel\.aichat\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.numberOfVisibleViews$/i
+    );
+    if (m2) {
+      ids.add(m2[1]);
+    }
   }
-  return chatRecords;
+  logger.log(`extractComposerIdsFromPaneKeys: ${ids.size} composer ID(s) from workspace panel keys`);
+  return ids;
+}
+function readWorkspaceChatSessionIndex(db, storagePath, logger) {
+  const rows = readItemTableBackend(db, logger, "ItemTable");
+  const sessionIds = /* @__PURE__ */ new Set();
+  const conversations = [];
+  for (const row of rows) {
+    if (!SESSION_INDEX_PATTERNS.some((p) => p.test(row.key))) {
+      continue;
+    }
+    const parsed = safeParseValue(row.value);
+    if (!parsed) {
+      continue;
+    }
+    const fromStore = parseChatSessionStoreIndex(row.key, parsed, storagePath, logger);
+    for (const c of fromStore) {
+      sessionIds.add(c.id);
+      conversations.push(c);
+    }
+  }
+  logger.log(
+    `Workspace session index: ${sessionIds.size} id(s) from ${conversations.length} row(s) in ${storagePath}`
+  );
+  return { conversations, sessionIds };
+}
+function discoverGlobalItemTableSessions(db, storagePath, logger) {
+  const rows = readItemTableBackend(db, logger, "ItemTable");
+  const conversations = [];
+  for (const row of rows) {
+    if (!SESSION_INDEX_PATTERNS.some((p) => p.test(row.key))) {
+      continue;
+    }
+    const parsed = safeParseValue(row.value);
+    if (!parsed) {
+      continue;
+    }
+    conversations.push(...parseChatSessionStoreIndex(row.key, parsed, storagePath, logger));
+  }
+  if (conversations.length > 0) {
+    logger.log(`globalStorage ItemTable session index: ${conversations.length} session(s)`);
+  }
+  return dedupeById(conversations);
+}
+function parseChatSessionStoreIndex(key, data, storagePath, logger) {
+  const results = [];
+  if (!data || typeof data !== "object") {
+    return results;
+  }
+  const root = data;
+  const entryLists = [];
+  if (Array.isArray(root["entries"])) {
+    entryLists.push(root["entries"]);
+  } else if (root["entries"] && typeof root["entries"] === "object") {
+    entryLists.push(
+      Object.entries(root["entries"]).map(([id, meta]) => {
+        if (meta && typeof meta === "object") {
+          return { ...meta, sessionId: id, id };
+        }
+        return { sessionId: id, id };
+      })
+    );
+  }
+  if (Array.isArray(root["sessions"])) {
+    entryLists.push(root["sessions"]);
+  }
+  if (Array.isArray(root["items"])) {
+    entryLists.push(root["items"]);
+  }
+  if (Array.isArray(root["allComposers"])) {
+    entryLists.push(root["allComposers"]);
+  }
+  if (Array.isArray(root["tabs"])) {
+    entryLists.push(root["tabs"]);
+  }
+  if (Array.isArray(data)) {
+    entryLists.push(data);
+  }
+  for (const list of entryLists) {
+    const arr = list;
+    for (const item of arr) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const e = item;
+      const id = stringOf(e["sessionId"] ?? e["id"] ?? e["composerId"] ?? e["chatId"] ?? e["tabId"]);
+      if (!id || !isUuidLike(id)) {
+        continue;
+      }
+      const title = stringOf(e["title"] ?? e["name"] ?? e["chatTitle"] ?? e["label"]);
+      const createdAt = isoFrom(e["createdAt"] ?? e["creationDate"] ?? e["timestamp"]);
+      const updatedAt = isoFrom(e["updatedAt"] ?? e["lastMessageDate"] ?? e["lastUpdatedAt"]);
+      results.push({
+        id,
+        title,
+        createdAt,
+        updatedAt,
+        messages: [],
+        storagePath,
+        sessionType: /composer/i.test(key) ? "composerIndex" : "chatSessionStore"
+      });
+    }
+  }
+  if (results.length > 0) {
+    logger.log(`[ItemTable] "${key}" \u2192 ${results.length} session(s)`);
+  }
+  return results;
+}
+function isUuidLike(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+function stringOf(v) {
+  if (typeof v === "string" && v.trim()) {
+    return v.trim();
+  }
+  if (typeof v === "number") {
+    return String(v);
+  }
+  return null;
+}
+function isoFrom(v) {
+  if (typeof v === "number" && v > 0) {
+    const ms = v < 1e12 ? v * 1e3 : v;
+    return new Date(ms).toISOString();
+  }
+  if (typeof v === "string") {
+    const d = new Date(v);
+    if (!isNaN(d.getTime())) {
+      return d.toISOString();
+    }
+  }
+  return null;
+}
+function dedupeById(conversations) {
+  const seen = /* @__PURE__ */ new Set();
+  return conversations.filter((c) => {
+    if (seen.has(c.id)) {
+      return false;
+    }
+    seen.add(c.id);
+    return true;
+  });
 }
 
 // src/chat/chatParser.ts
@@ -2999,11 +3663,23 @@ var CAPABILITY_LABELS = {
   50: "Search",
   60: "Browser"
 };
-function composerToConversation(composer, bubbles, logger) {
+function composerToConversation(composer, bubbles, logger, options = {}) {
+  const includeNonRenderable = options.includeNonRenderable !== false;
   const messages = [];
   const parseErrors = [];
-  for (const header of composer.headers) {
-    if (!header.isRenderable) {
+  const headersToWalk = composer.headers.length > 0 ? composer.headers : [...bubbles.keys()].map((bubbleId) => ({
+    bubbleId,
+    type: 0,
+    isRenderable: true,
+    hasText: true,
+    isSimulatedMsg: false,
+    capabilityType: null,
+    toolFormerTool: null,
+    toolCallId: null,
+    hasThinking: false
+  }));
+  for (const header of headersToWalk) {
+    if (!includeNonRenderable && !header.isRenderable) {
       continue;
     }
     const bubble = bubbles.get(header.bubbleId);
@@ -3122,9 +3798,865 @@ function cleanTitle(raw) {
   return raw.replace(/^#{1,6}\s+/, "").replace(/[*_`]+/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
+// src/discovery/keyInspect.ts
+var SUSPICIOUS_KEY_TERMS = [
+  "composer",
+  "chat",
+  "conversation",
+  "agent",
+  "ai",
+  "bubble",
+  "message",
+  "tabs",
+  "workbench",
+  "aichat",
+  "cursor",
+  "thread",
+  "session",
+  "archive",
+  "history"
+];
+function countKeysByPattern(keys) {
+  const counts = {};
+  for (const term of SUSPICIOUS_KEY_TERMS) {
+    counts[term] = 0;
+  }
+  counts["composerData:"] = 0;
+  counts["bubbleId:"] = 0;
+  for (const key of keys) {
+    const lower = key.toLowerCase();
+    for (const term of SUSPICIOUS_KEY_TERMS) {
+      if (lower.includes(term)) {
+        counts[term]++;
+      }
+    }
+    if (key.startsWith("composerData:")) {
+      counts["composerData:"]++;
+    }
+    if (key.startsWith("bubbleId:")) {
+      counts["bubbleId:"]++;
+    }
+  }
+  return counts;
+}
+
+// src/discovery/lightDbScan.ts
+var LARGE_DB_BYTES = 100 * 1024 * 1024;
+var KEY_SAMPLE_LIMIT = 40;
+function tableRowCount(db, tableName) {
+  try {
+    const r = db.exec(`SELECT COUNT(*) as c FROM ${JSON.stringify(tableName)}`);
+    if (!r.length || !r[0].rows.length) {
+      return null;
+    }
+    return Number(r[0].rows[0][0]) ?? null;
+  } catch {
+    return null;
+  }
+}
+function countWhere(db, table, where) {
+  try {
+    const r = db.exec(`SELECT COUNT(*) FROM ${JSON.stringify(table)} WHERE ${where}`);
+    if (!r.length || !r[0].rows.length) {
+      return 0;
+    }
+    return Number(r[0].rows[0][0]) ?? 0;
+  } catch {
+    return 0;
+  }
+}
+function sampleKeys(db, dbPath, tableName, keyCol, valueCol, limit) {
+  const rows = [];
+  const where = buildChatKeySqlWhere(keyCol);
+  try {
+    const sql = `SELECT ${JSON.stringify(keyCol)}, length(${JSON.stringify(valueCol)}) as sz FROM ${JSON.stringify(tableName)} WHERE (${where}) LIMIT ${limit}`;
+    const result = db.exec(sql);
+    if (!result.length) {
+      return rows;
+    }
+    for (const row of result[0].rows) {
+      rows.push({
+        dbPath,
+        tableName,
+        key: String(row[0] ?? ""),
+        valueSizeBytes: Number(row[1] ?? 0),
+        meta: {
+          isValidJson: false,
+          topLevelType: "not-loaded",
+          topLevelKeys: [],
+          arrayLength: null
+        }
+      });
+    }
+  } catch {
+  }
+  return rows;
+}
+async function scanDatabaseLight(dbPath, logger) {
+  const sizeBytes = getDatabaseSizeBytes(dbPath);
+  const isLarge = sizeBytes >= LARGE_DB_BYTES;
+  const info = {
+    dbPath,
+    sizeBytes,
+    opened: false,
+    backend: "none",
+    tables: [],
+    suspiciousKeys: [],
+    keyPatternCounts: {}
+  };
+  const db = await openDatabaseBackend(dbPath, logger);
+  if (!db) {
+    info.openError = "Could not open database";
+    return info;
+  }
+  info.opened = true;
+  info.backend = db.kind;
+  try {
+    logger.log(
+      `Light scan ${formatSizeMb(sizeBytes)} MB DB (${isLarge ? "large \u2014 counts + sample only" : "full sample"})`
+    );
+    const tables = listTablesBackend(db, logger);
+    for (const t of tables) {
+      const rowCount = tableRowCount(db, t.name);
+      info.tables.push({ name: t.name, columns: t.columns, rowCount });
+      const cols = t.columns.map((c) => c.toLowerCase());
+      const hasKey = cols.includes("key") || cols.includes("id");
+      const hasVal = cols.includes("value") || cols.includes("data") || cols.includes("content");
+      if (!hasKey || !hasVal) {
+        continue;
+      }
+      const keyCol = t.columns.find((c) => ["key", "id"].includes(c.toLowerCase()));
+      const valueCol = t.columns.find(
+        (c) => ["value", "data", "content"].includes(c.toLowerCase())
+      );
+      if (t.name === "cursorDiskKV") {
+        const composerN = countWhere(db, t.name, `key LIKE 'composerData:%'`);
+        const bubbleN = countWhere(db, t.name, `key LIKE 'bubbleId:%'`);
+        info.keyPatternCounts["composerData:"] = composerN;
+        info.keyPatternCounts["bubbleId:"] = bubbleN;
+        logger.log(`  cursorDiskKV: composerData=${composerN}, bubbleId=${bubbleN}`);
+      }
+      if (isLarge) {
+        info.suspiciousKeys.push(
+          ...sampleKeys(db, dbPath, t.name, keyCol, valueCol, KEY_SAMPLE_LIMIT)
+        );
+      } else {
+        const where = buildChatKeySqlWhere(keyCol);
+        try {
+          const sql = `SELECT ${JSON.stringify(keyCol)}, length(${JSON.stringify(valueCol)}) as sz FROM ${JSON.stringify(t.name)} WHERE (${where}) LIMIT 500`;
+          const result = db.exec(sql);
+          if (result.length) {
+            for (const row of result[0].rows) {
+              info.suspiciousKeys.push({
+                dbPath,
+                tableName: t.name,
+                key: String(row[0] ?? ""),
+                valueSizeBytes: Number(row[1] ?? 0),
+                meta: {
+                  isValidJson: false,
+                  topLevelType: "not-loaded",
+                  topLevelKeys: [],
+                  arrayLength: null
+                }
+              });
+            }
+          }
+        } catch {
+        }
+      }
+    }
+    info.keyPatternCounts = {
+      ...info.keyPatternCounts,
+      ...countKeysByPattern(info.suspiciousKeys.map((k) => k.key))
+    };
+  } finally {
+    db.close();
+  }
+  return info;
+}
+
+// src/discovery/dedupeConversations.ts
+function firstLine(role, messages) {
+  const m = messages.find((msg) => msg.role === role);
+  return m?.content?.split("\n")[0]?.trim().slice(0, 120) ?? "";
+}
+function fingerprint(conv) {
+  const title = (conv.title ?? "").trim().toLowerCase();
+  const user = firstLine("user", conv.messages);
+  const assistant = firstLine("assistant", conv.messages);
+  return `fp:${title}|${user}|${assistant}|${conv.messages.length}`;
+}
+function isStrongId(id) {
+  if (!id || id.length < 8) {
+    return false;
+  }
+  if (id.startsWith("fp:")) {
+    return false;
+  }
+  return /^[0-9a-f-]{20,}$/i.test(id) || id.length >= 16;
+}
+function dedupeConversations(conversations) {
+  const byStrongId = /* @__PURE__ */ new Map();
+  const byFingerprint = /* @__PURE__ */ new Map();
+  const removed = [];
+  const result = [];
+  for (const conv of conversations) {
+    const id = conv.id?.trim() ?? "";
+    if (isStrongId(id)) {
+      const existing = byStrongId.get(id);
+      if (existing) {
+        const keep = pickRicher(existing, conv);
+        const drop = keep === existing ? conv : existing;
+        if (keep === conv) {
+          byStrongId.set(id, conv);
+          const idx = result.indexOf(existing);
+          if (idx >= 0) {
+            result[idx] = conv;
+          }
+        }
+        if (drop.id !== keep.id) {
+          removed.push({
+            removedId: drop.id,
+            keptId: keep.id,
+            reason: id.includes("tab") ? "tabId" : id.includes("session") ? "sessionId" : "composerId"
+          });
+        }
+        continue;
+      }
+      byStrongId.set(id, conv);
+      result.push(conv);
+      continue;
+    }
+    const fp = fingerprint(conv);
+    const existingFp = byFingerprint.get(fp);
+    if (existingFp && conv.messages.length <= existingFp.messages.length) {
+      removed.push({ removedId: conv.id, keptId: existingFp.id, reason: "fingerprint" });
+      continue;
+    }
+    if (existingFp) {
+      removed.push({ removedId: existingFp.id, keptId: conv.id, reason: "fingerprint" });
+      const idx = result.indexOf(existingFp);
+      if (idx >= 0) {
+        result[idx] = conv;
+      }
+      byFingerprint.set(fp, conv);
+      continue;
+    }
+    byFingerprint.set(fp, conv);
+    result.push(conv);
+  }
+  return { conversations: result, removed };
+}
+function pickRicher(a, b) {
+  if (b.messages.length > a.messages.length) {
+    return b;
+  }
+  if (a.messages.length > b.messages.length) {
+    return a;
+  }
+  return (b.title?.length ?? 0) > (a.title?.length ?? 0) ? b : a;
+}
+
+// src/discovery/discoveryReport.ts
+var fs7 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
+function buildMismatchExplanation(stats) {
+  const ui = stats.uiCountHint;
+  let mismatchCase = "UNKNOWN";
+  let explanation = "";
+  if (ui !== null && stats.afterDedupe === ui) {
+    mismatchCase = "OK";
+    explanation = `Export count (${stats.afterDedupe}) matches UI hint (${ui}).`;
+  } else if (stats.matchedComposers <= 5 && stats.totalComposerData > stats.matchedComposers * 3) {
+    mismatchCase = "D";
+    explanation = `Case D: globalStorage has ${stats.totalComposerData} composerData rows but only ${stats.matchedComposers} matched this workspace. Workspace path/hash matching or SQL prefilter may be too strict \u2014 enable folder-name matching and load ALL composerData without SQL filter.`;
+  } else if (stats.candidates >= 40 && stats.beforeDedupe <= 10) {
+    mismatchCase = "B";
+    explanation = `Case B: ${stats.candidates} raw candidates found but only ${stats.beforeDedupe} parsed into conversations. Parser is incomplete for some key formats.`;
+  } else if (stats.beforeDedupe >= 40 && stats.afterDedupe <= 10) {
+    mismatchCase = "C";
+    explanation = `Case C: ${stats.beforeDedupe} parsed before dedupe but only ${stats.afterDedupe} after dedupe (${stats.dedupeRemoved} removed). Review dedupe logs.`;
+  } else if (stats.candidates <= 10 && stats.matchedComposers <= 10) {
+    mismatchCase = "A";
+    explanation = `Case A: Only ${stats.candidates} candidates / ${stats.matchedComposers} matched composers. Storage scan or key discovery is incomplete \u2014 check archived keys in ItemTable and all composerData rows.`;
+  } else if (ui !== null && stats.afterDedupe > ui * 2) {
+    mismatchCase = "UNKNOWN";
+    explanation = `Found ${stats.afterDedupe} conversations after dedupe but UI shows ~${ui}. Over-discovery was trimmed \u2014 if still high, check folder-name workspace matches (wamp vs laragon).`;
+  } else if (ui !== null && stats.afterDedupe >= ui * 0.5 && stats.afterDedupe <= ui * 1.5) {
+    mismatchCase = "OK";
+    explanation = `Export count (${stats.afterDedupe}) is close to UI hint (~${ui}).`;
+  } else {
+    mismatchCase = "UNKNOWN";
+    explanation = `Candidates: ${stats.candidates}, matched composers: ${stats.matchedComposers}, parsed: ${stats.beforeDedupe}, after dedupe: ${stats.afterDedupe}, total composerData in global: ${stats.totalComposerData}.` + (ui !== null ? ` Cursor UI shows ~${ui}.` : "");
+  }
+  return { mismatchCase, mismatchExplanation: explanation };
+}
+function formatDiscoveryReportMarkdown(report) {
+  const lines = [];
+  lines.push("# Conversation Discovery Report");
+  lines.push("");
+  lines.push(`- **Generated:** ${report.generatedAt}`);
+  lines.push(`- **Workspace:** ${report.workspacePath}`);
+  lines.push(`- **Normalized path:** ${report.normalizedWorkspacePath}`);
+  lines.push(`- **Workspace storage hashes:** ${report.workspaceStorageHashes.join(", ") || "(none)"}`);
+  lines.push(`- **Include folder-name matches:** ${report.includePossibleByFolderName}`);
+  lines.push(`- **globalStorage scanned:** ${report.globalStorageScanned}`);
+  if (report.globalStoragePath) {
+    lines.push(`- **globalStorage path:** ${report.globalStoragePath}`);
+  }
+  lines.push("");
+  lines.push("## Mismatch analysis");
+  lines.push("");
+  lines.push(`- **Case:** ${report.mismatchCase}`);
+  lines.push(`- **Explanation:** ${report.mismatchExplanation}`);
+  lines.push("");
+  lines.push("## Counts");
+  lines.push("");
+  lines.push(`| Metric | Count |`);
+  lines.push(`|--------|------:|`);
+  lines.push(`| composerData:* rows in global DB | ${report.totalComposerDataInGlobal} |`);
+  lines.push(`| Composers matching workspace filter | ${report.composerDataAfterWorkspaceFilter} |`);
+  lines.push(`| Suspicious keys logged | ${report.suspiciousKeyTotal} |`);
+  lines.push(`| Raw candidates | ${report.candidatesFound} |`);
+  lines.push(`| Parsed conversations (before dedupe) | ${report.conversationsBeforeDedupe} |`);
+  lines.push(`| Final conversations (after dedupe) | ${report.conversationsAfterDedupe} |`);
+  lines.push(`| Duplicates removed | ${report.dedupeRemoved.length} |`);
+  lines.push("");
+  lines.push("## Databases scanned");
+  lines.push("");
+  for (const db of report.dbScans) {
+    lines.push(`### \`${db.dbPath}\``);
+    lines.push("");
+    lines.push(`- **Size:** ${(db.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
+    lines.push(`- **Opened:** ${db.opened} (${db.backend})`);
+    if (db.openError) {
+      lines.push(`- **Error:** ${db.openError}`);
+    }
+    lines.push("- **Tables:**");
+    for (const t of db.tables) {
+      lines.push(`  - \`${t.name}\` \u2014 columns: ${t.columns.join(", ")} \u2014 rows: ${t.rowCount ?? "?"}`);
+    }
+    lines.push("- **Key pattern counts:**");
+    for (const [k, v] of Object.entries(db.keyPatternCounts)) {
+      if (v > 0) {
+        lines.push(`  - ${k}: ${v}`);
+      }
+    }
+    lines.push("");
+  }
+  if (report.dedupeRemoved.length > 0) {
+    lines.push("## Deduplication removed");
+    lines.push("");
+    for (const d of report.dedupeRemoved.slice(0, 50)) {
+      lines.push(`- removed \`${d.removedId}\` kept \`${d.keptId}\` (${d.reason})`);
+    }
+    if (report.dedupeRemoved.length > 50) {
+      lines.push(`- \u2026 and ${report.dedupeRemoved.length - 50} more`);
+    }
+    lines.push("");
+  }
+  if (report.unparsedRelevant.length > 0) {
+    lines.push("## Relevant JSON not parsed");
+    lines.push("");
+    for (const u of report.unparsedRelevant.slice(0, 80)) {
+      lines.push(`- **${u.dbPath}** / \`${u.table}\` / \`${u.key}\` \u2014 keys: ${u.topLevelKeys.join(", ")} \u2014 ${u.reason}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+function writeDiscoveryReportFile(workspacePath, report, logger) {
+  const outDir = path7.join(workspacePath, ".cursor-chat-export", "diagnostics");
+  const outPath = path7.join(outDir, "conversation-discovery-report.md");
+  fs7.mkdirSync(outDir, { recursive: true });
+  const md = formatDiscoveryReportMarkdown(report);
+  fs7.writeFileSync(outPath, md, "utf8");
+  logger.log(`Wrote discovery report: ${outPath}`);
+  return outPath;
+}
+function logDiscoveryReportToChannel(report, logger) {
+  logger.log("=== Conversation Discovery Report ===");
+  logger.log(`Workspace: ${report.workspacePath}`);
+  logger.log(`Normalized: ${report.normalizedWorkspacePath}`);
+  logger.log(`Hashes: ${report.workspaceStorageHashes.join(", ")}`);
+  logger.log(`globalStorage scanned: ${report.globalStorageScanned}`);
+  logger.log(`Total composerData in global: ${report.totalComposerDataInGlobal}`);
+  logger.log(`Matched workspace composers: ${report.composerDataAfterWorkspaceFilter}`);
+  logger.log(`Suspicious keys: ${report.suspiciousKeyTotal}`);
+  logger.log(`Candidates: ${report.candidatesFound}`);
+  logger.log(`Parsed (before dedupe): ${report.conversationsBeforeDedupe}`);
+  logger.log(`Final (after dedupe): ${report.conversationsAfterDedupe}`);
+  logger.log(`Dedupe removed: ${report.dedupeRemoved.length}`);
+  logger.log(`Case ${report.mismatchCase}: ${report.mismatchExplanation}`);
+  for (const db of report.dbScans) {
+    logger.log(`DB: ${db.dbPath} (${(db.sizeBytes / 1024 / 1024).toFixed(1)} MB) backend=${db.backend}`);
+    for (const t of db.tables) {
+      logger.log(`  table ${t.name}: ${t.rowCount ?? "?"} rows`);
+    }
+    for (const [k, v] of Object.entries(db.keyPatternCounts)) {
+      if (v > 0) {
+        logger.log(`  pattern "${k}": ${v}`);
+      }
+    }
+    for (const sk of db.suspiciousKeys.slice(0, 30)) {
+      logger.log(
+        `  key "${sk.key}" (${sk.tableName}) size=${sk.valueSizeBytes} json=${sk.meta.isValidJson} type=${sk.meta.topLevelType}` + (sk.meta.topLevelKeys.length ? ` keys=${sk.meta.topLevelKeys.slice(0, 8).join(",")}` : "") + (sk.meta.arrayLength !== null ? ` arrLen=${sk.meta.arrayLength}` : "")
+      );
+    }
+    if (db.suspiciousKeys.length > 30) {
+      logger.log(`  \u2026 ${db.suspiciousKeys.length - 30} more suspicious keys (see markdown report)`);
+    }
+  }
+}
+
+// src/discovery/conversationDiscovery.ts
+async function discoverConversationsForWorkspace(opts) {
+  const includePossible = opts.includePossibleByFolderName !== false;
+  const isDiagnostic = opts.mode === "diagnostic";
+  const deferBubbleLoad = opts.deferBubbleLoad === true && !isDiagnostic;
+  const logger = opts.logger;
+  const workspacePath = opts.workspacePath;
+  const normalizedPath = normaliseWsPath(workspacePath);
+  const matchOpts = { includeByFolderName: includePossible };
+  let workspaceHashes = [];
+  const dbScans = [];
+  let matchingWorkspaceEntries = [];
+  if (opts.wsStoragePath) {
+    const entries = scanWorkspaceStorage(opts.wsStoragePath, logger);
+    matchingWorkspaceEntries = findMatchingEntries(entries, workspacePath, logger, matchOpts);
+    workspaceHashes = matchingWorkspaceEntries.map((e) => e.hash);
+    for (const entry of matchingWorkspaceEntries) {
+      if (entry.dbPath) {
+        dbScans.push(await scanDatabaseLight(entry.dbPath, logger));
+      }
+    }
+  }
+  let globalDb = null;
+  let totalComposerData = 0;
+  let allComposers = [];
+  const unparsedRelevant = [];
+  const candidates = [];
+  const composerIdsFromIndex = /* @__PURE__ */ new Set();
+  const canonicalSessionIds = /* @__PURE__ */ new Set();
+  const conversationsFromItemTable = [];
+  let usedSqlPrefilter = false;
+  const primaryEntry = selectPrimaryWorkspaceStorageEntry(
+    matchingWorkspaceEntries,
+    workspacePath,
+    logger
+  );
+  if (primaryEntry?.dbPath) {
+    const wsDb = await openDatabaseBackend(primaryEntry.dbPath, logger);
+    if (wsDb) {
+      try {
+        const paneComposerIds = extractComposerIdsFromPaneKeys(wsDb, logger);
+        for (const id of paneComposerIds) {
+          canonicalSessionIds.add(id);
+          composerIdsFromIndex.add(id);
+        }
+        const { conversations: indexConvs, sessionIds } = readWorkspaceChatSessionIndex(
+          wsDb,
+          primaryEntry.dbPath,
+          logger
+        );
+        conversationsFromItemTable.push(...indexConvs);
+        for (const id of sessionIds) {
+          canonicalSessionIds.add(id);
+          composerIdsFromIndex.add(id);
+        }
+        for (const conv of indexConvs) {
+          candidates.push(
+            makeCandidateFromConversation(
+              conv,
+              primaryEntry.dbPath,
+              "ItemTable",
+              "chat.ChatSessionStore.index",
+              false
+            )
+          );
+        }
+        logger.log(
+          `Workspace panel IDs: ${paneComposerIds.size} from panel keys, ${sessionIds.size} from session index, ${canonicalSessionIds.size} total canonical IDs`
+        );
+      } catch (err) {
+        logger.warn(`Primary workspace ItemTable scan failed: ${String(err)}`);
+      } finally {
+        closeDatabaseBackend(wsDb, logger);
+      }
+    }
+  }
+  if (opts.globalStoragePath) {
+    const globalDbPath2 = path8.join(opts.globalStoragePath, "state.vscdb");
+    dbScans.unshift(await scanDatabaseLight(globalDbPath2, logger));
+    globalDb = await openGlobalStorageDb(opts.globalStoragePath, logger);
+    if (globalDb) {
+      try {
+        if (hasCursorDiskKV(globalDb, logger)) {
+          const loaded = readComposerHeadersForWorkspace(
+            globalDb,
+            workspacePath,
+            workspaceHashes,
+            logger
+          );
+          totalComposerData = loaded.totalInDb;
+          allComposers = loaded.headers;
+          usedSqlPrefilter = loaded.usedSqlPrefilter;
+          const skipExhaustive = canonicalSessionIds.size >= 5;
+          if (!isDiagnostic && !skipExhaustive && totalComposerData > loaded.headers.length + 20) {
+            allComposers = discoverComposersExhaustive(
+              globalDb,
+              workspacePath,
+              workspaceHashes,
+              logger,
+              includePossible,
+              allComposers
+            );
+          } else if (skipExhaustive) {
+            logger.log(
+              `Skipping batch composer scan (${canonicalSessionIds.size} sessions in workspace index)`
+            );
+          }
+          logger.log(
+            `composerData: ${totalComposerData} total in DB, ${allComposers.length} matched for workspace`
+          );
+        }
+        const globalIndexConvs = discoverGlobalItemTableSessions(
+          globalDb,
+          globalDbPath2,
+          logger
+        );
+        for (const c of globalIndexConvs) {
+          canonicalSessionIds.add(c.id);
+        }
+      } catch (err) {
+        logger.error("globalStorage discovery error", err);
+      }
+    }
+  }
+  if (globalDb && composerIdsFromIndex.size > 0) {
+    const knownIds = new Set(allComposers.map((c) => c.composerId));
+    let added = 0;
+    const idsToLoad = [...canonicalSessionIds].filter((id) => !knownIds.has(id));
+    logger.log(`Loading ${idsToLoad.length} composer(s) by canonical ID from workspace panel`);
+    for (const id of idsToLoad.slice(0, 150)) {
+      const h = loadComposerHeaderById(globalDb, id, logger);
+      if (h) {
+        allComposers.push(h);
+        knownIds.add(id);
+        added++;
+      }
+    }
+    if (added > 0) {
+      logger.log(`Added ${added} composer(s) by canonical ID lookup`);
+    }
+  }
+  const strictMatched = filterComposersByWorkspace2(
+    allComposers,
+    workspacePath,
+    logger,
+    workspaceHashes,
+    includePossible
+  );
+  const matchedComposers = mergeComposersForWorkspace(
+    strictMatched,
+    allComposers,
+    canonicalSessionIds,
+    usedSqlPrefilter,
+    logger
+  );
+  const conversationsFromComposers = [];
+  const globalDbPath = opts.globalStoragePath ? path8.join(opts.globalStoragePath, "state.vscdb") : "";
+  if (globalDb) {
+    const maxLoads = isDiagnostic ? 0 : matchedComposers.length;
+    for (const composer of matchedComposers) {
+      candidates.push({
+        id: composer.composerId,
+        dbPath: globalDbPath,
+        tableName: "cursorDiskKV",
+        key: `composerData:${composer.composerId}`,
+        valueSizeBytes: 0,
+        title: composer.name,
+        messageCountEstimate: composer.headers.length,
+        bubbleCountEstimate: composer.headers.length,
+        parsed: !isDiagnostic,
+        parseReason: isDiagnostic ? "diagnostic (headers only)" : void 0,
+        source: "cursorDiskKV",
+        composerId: composer.composerId
+      });
+      if (isDiagnostic || deferBubbleLoad) {
+        conversationsFromComposers.push(stubConversationFromComposer(composer));
+        continue;
+      }
+      const bubbleIds = composer.headers.map((h) => h.bubbleId);
+      const bubbles = loadBubblesForComposer(globalDb, composer.composerId, logger, bubbleIds);
+      const conv = composerToConversation(composer, bubbles, logger, {
+        includeNonRenderable: true
+      });
+      if (conv.messages.length > 0) {
+        conversationsFromComposers.push(conv);
+        updateCandidateParsed(candidates, composer.composerId, conv, globalDbPath);
+      }
+    }
+    const enrichedItemTable = enrichItemTableFromGlobal(
+      conversationsFromItemTable,
+      globalDb,
+      logger,
+      isDiagnostic || deferBubbleLoad
+    );
+    conversationsFromComposers.push(...enrichedItemTable);
+    closeDatabaseBackend(globalDb, logger);
+    globalDb = null;
+    if (deferBubbleLoad) {
+      logger.log(
+        `Deferred bubble load: ${conversationsFromComposers.length} conversation stub(s) \u2014 messages load after you pick chats to export`
+      );
+    } else if (!isDiagnostic && maxLoads > 0) {
+      logger.log(`Loaded bubble content for ${conversationsFromComposers.length} conversations`);
+    }
+  } else if (conversationsFromItemTable.length > 0) {
+    conversationsFromComposers.push(...conversationsFromItemTable);
+  }
+  const scoped = filterConversationsToWorkspaceScope(
+    conversationsFromComposers,
+    canonicalSessionIds,
+    new Set(matchedComposers.map((c) => c.composerId)),
+    logger
+  );
+  const beforeDedupe = [...scoped];
+  const { conversations: afterDedupe, removed: dedupeRemoved } = dedupeConversations(beforeDedupe);
+  const suspiciousKeyTotal = dbScans.reduce((s, d) => s + d.suspiciousKeys.length, 0);
+  const report = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    workspacePath,
+    normalizedWorkspacePath: normalizedPath,
+    workspaceStorageHashes: workspaceHashes,
+    includePossibleByFolderName: includePossible,
+    globalStorageScanned: !!opts.globalStoragePath,
+    globalStoragePath: opts.globalStoragePath,
+    dbScans,
+    totalComposerDataInGlobal: totalComposerData,
+    composerDataAfterWorkspaceFilter: matchedComposers.length,
+    suspiciousKeyTotal,
+    candidatesFound: candidates.length,
+    parsedConversationCount: beforeDedupe.length,
+    conversationsBeforeDedupe: beforeDedupe.length,
+    conversationsAfterDedupe: afterDedupe.length,
+    dedupeRemoved,
+    unparsedRelevant,
+    ...buildMismatchExplanation({
+      uiCountHint: null,
+      totalComposerData,
+      matchedComposers: matchedComposers.length,
+      allComposersParsed: allComposers.length,
+      candidates: candidates.length,
+      beforeDedupe: beforeDedupe.length,
+      afterDedupe: afterDedupe.length,
+      dedupeRemoved: dedupeRemoved.length
+    })
+  };
+  logger.log(`Discovery summary: ${report.mismatchExplanation}`);
+  return {
+    report,
+    candidates,
+    composers: matchedComposers,
+    conversations: afterDedupe,
+    allComposersInGlobal: allComposers,
+    matchedComposers
+  };
+}
+function stubConversationFromComposer(composer) {
+  return {
+    id: composer.composerId,
+    title: composer.name,
+    createdAt: composer.createdAt ? new Date(composer.createdAt).toISOString() : null,
+    updatedAt: composer.lastUpdatedAt ? new Date(composer.lastUpdatedAt).toISOString() : null,
+    messages: [],
+    storagePath: "globalStorage/cursorDiskKV",
+    sessionType: composer.unifiedMode ?? "composer",
+    estimatedMessageCount: composer.messageCount || composer.headers.length
+  };
+}
+async function hydrateConversationsForExport(conversations, composers, globalStoragePath, logger, onProgress) {
+  const byId = new Map(composers.map((c) => [c.composerId, c]));
+  const globalDb = await openGlobalStorageDb(globalStoragePath, logger);
+  if (!globalDb) {
+    logger.warn("hydrateConversationsForExport: could not open globalStorage");
+    return conversations;
+  }
+  const hydrated = [];
+  try {
+    for (let i = 0; i < conversations.length; i++) {
+      const stub = conversations[i];
+      const composer = byId.get(stub.id);
+      if (!composer) {
+        logger.warn(`No composer header for ${stub.id}, keeping stub`);
+        hydrated.push(stub);
+        continue;
+      }
+      const t0 = Date.now();
+      const bubbleIds = composer.headers.map((h) => h.bubbleId);
+      const bubbles = loadBubblesForComposer(globalDb, composer.composerId, logger, bubbleIds);
+      const conv = composerToConversation(composer, bubbles, logger, {
+        includeNonRenderable: true
+      });
+      const label = composer.name ?? stub.id;
+      onProgress?.(i + 1, conversations.length, label);
+      logger.log(
+        `[${i + 1}/${conversations.length}] "${label}" \u2014 ${conv.messages.length} messages in ${Date.now() - t0}ms`
+      );
+      hydrated.push(conv.messages.length > 0 ? conv : stub);
+    }
+  } finally {
+    closeDatabaseBackend(globalDb, logger);
+  }
+  return hydrated;
+}
+function makeCandidateFromConversation(conv, dbPath, tableName, key, parsed) {
+  return {
+    id: conv.id,
+    dbPath,
+    tableName,
+    key,
+    valueSizeBytes: 0,
+    title: conv.title,
+    messageCountEstimate: conv.messages.length,
+    bubbleCountEstimate: conv.messages.length,
+    parsed,
+    source: tableName,
+    composerId: conv.id
+  };
+}
+function updateCandidateParsed(candidates, composerId, conv, dbPath) {
+  const idx = candidates.findIndex((c) => c.composerId === composerId);
+  if (idx >= 0) {
+    candidates[idx] = makeCandidateFromConversation(
+      conv,
+      dbPath,
+      "cursorDiskKV",
+      `composerData:${composerId}`,
+      true
+    );
+  }
+}
+function mergeComposersForWorkspace(strictMatched, allComposers, canonicalSessionIds, usedSqlPrefilter, logger) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const c of strictMatched) {
+    byId.set(c.composerId, c);
+  }
+  if (canonicalSessionIds.size > 0) {
+    for (const c of allComposers) {
+      if (canonicalSessionIds.has(c.composerId)) {
+        byId.set(c.composerId, c);
+      }
+    }
+  } else if (usedSqlPrefilter && allComposers.length > strictMatched.length) {
+    logger.log(
+      `No session index \u2014 using ${allComposers.length} SQL-scoped composers (strict: ${strictMatched.length})`
+    );
+    for (const c of allComposers) {
+      byId.set(c.composerId, c);
+    }
+  }
+  const merged = [...byId.values()];
+  logger.log(
+    `Workspace composers for export: ${merged.length} (strict ${strictMatched.length}, canonical ${canonicalSessionIds.size})`
+  );
+  return merged;
+}
+function filterConversationsToWorkspaceScope(conversations, canonicalSessionIds, matchedComposerIds, logger) {
+  if (canonicalSessionIds.size === 0) {
+    const kept2 = conversations.filter(
+      (c) => matchedComposerIds.has(c.id) || c.messages.length > 0
+    );
+    logger.log(`Scope filter (no index): ${kept2.length}/${conversations.length}`);
+    return kept2;
+  }
+  const kept = conversations.filter(
+    (c) => canonicalSessionIds.has(c.id) || matchedComposerIds.has(c.id)
+  );
+  logger.log(
+    `Scope filter: ${kept.length}/${conversations.length} (index ${canonicalSessionIds.size}, composers ${matchedComposerIds.size})`
+  );
+  return kept;
+}
+function enrichItemTableFromGlobal(itemConvs, globalDb, logger, isDiagnostic) {
+  if (!globalDb || itemConvs.length === 0) {
+    return itemConvs;
+  }
+  const out = [];
+  let enriched = 0;
+  for (const stub of itemConvs) {
+    if (stub.messages.length > 0) {
+      out.push(stub);
+      continue;
+    }
+    const header = loadComposerHeaderById(globalDb, stub.id, logger);
+    if (!header) {
+      out.push(stub);
+      continue;
+    }
+    if (isDiagnostic) {
+      out.push(stubConversationFromComposer(header));
+      enriched++;
+      continue;
+    }
+    const bubbleIds = header.headers.map((h) => h.bubbleId);
+    const bubbles = loadBubblesForComposer(globalDb, stub.id, logger, bubbleIds);
+    const conv = composerToConversation(header, bubbles, logger, {
+      includeNonRenderable: true
+    });
+    if (conv.messages.length > 0) {
+      out.push(conv);
+      enriched++;
+    } else {
+      out.push(stubConversationFromComposer(header));
+      enriched++;
+    }
+  }
+  if (enriched > 0) {
+    logger.log(`Enriched ${enriched}/${itemConvs.length} ItemTable session(s) from globalStorage`);
+  }
+  return out;
+}
+
+// src/chat/schemaDiscovery.ts
+var CHAT_KEY_PATTERNS = [
+  /composer/i,
+  /aichat/i,
+  /aiService/i,
+  /chatdata/i,
+  /cursor\.chat/i,
+  /cursor\.composer/i,
+  /cursor\.agent/i,
+  /chatHistory/i,
+  /conversationHistory/i,
+  /conversation/i,
+  /bubbleId/i,
+  /bubble/i,
+  /tabs/i,
+  /workbench/i,
+  /archive/i,
+  /history/i,
+  /thread/i,
+  /session/i,
+  /message/i
+];
+function filterChatRecords(records, logger) {
+  const chatRecords = records.filter(
+    (r) => CHAT_KEY_PATTERNS.some((p) => p.test(r.key))
+  );
+  logger.log(
+    `filterChatRecords: ${chatRecords.length}/${records.length} records match chat key patterns`
+  );
+  if (chatRecords.length > 0) {
+    logger.log(`  Matched keys: ${chatRecords.map((r) => r.key).join(", ")}`);
+  }
+  return chatRecords;
+}
+
 // src/export/markdownExporter.ts
-var fs5 = __toESM(require("fs"));
-var path5 = __toESM(require("path"));
+var fs8 = __toESM(require("fs"));
+var path9 = __toESM(require("path"));
 
 // src/export/exportFilter.ts
 function getMessageTextForFiltering(message) {
@@ -3334,15 +4866,15 @@ function normaliseContent(content) {
 }
 function writeMarkdownFile(outputDir, filename, markdown, logger) {
   try {
-    fs5.mkdirSync(outputDir, { recursive: true });
+    fs8.mkdirSync(outputDir, { recursive: true });
   } catch (err) {
     const msg = `Failed to create output directory: ${outputDir} \u2014 ${String(err)}`;
     logger.error(msg);
-    return { outputPath: path5.join(outputDir, filename), skipped: false, error: msg };
+    return { outputPath: path9.join(outputDir, filename), skipped: false, error: msg };
   }
-  const outputPath = path5.join(outputDir, filename);
+  const outputPath = path9.join(outputDir, filename);
   try {
-    fs5.writeFileSync(outputPath, markdown, "utf8");
+    fs8.writeFileSync(outputPath, markdown, "utf8");
     logger.log(`Wrote: ${outputPath}`);
     return { outputPath, skipped: false };
   } catch (err) {
@@ -3404,8 +4936,8 @@ function makeUniqueFilename(baseName, usedNames, ext = ".md") {
 }
 
 // src/export/indexGenerator.ts
-var fs6 = __toESM(require("fs"));
-var path6 = __toESM(require("path"));
+var fs9 = __toESM(require("fs"));
+var path10 = __toESM(require("path"));
 function writeIndexFile(outputDir, workspacePath, results, exportedAt, logger) {
   const lines = [];
   const successful = results.filter((r) => !r.error && !r.skipped);
@@ -3435,7 +4967,7 @@ function writeIndexFile(outputDir, workspacePath, results, exportedAt, logger) {
   lines.push("## Exported Files");
   lines.push("");
   for (const r of successful) {
-    const filename = path6.basename(r.outputPath);
+    const filename = path10.basename(r.outputPath);
     const title = r.conversation.title ?? "*(untitled)*";
     const date = r.conversation.createdAt ? ` \u2014 ${r.conversation.createdAt.slice(0, 10)}` : "";
     const visibleCount = r.visibleCount ?? r.conversation.messages.length;
@@ -3473,7 +5005,7 @@ function writeIndexFile(outputDir, workspacePath, results, exportedAt, logger) {
     lines.push("## Failed Exports");
     lines.push("");
     for (const r of failed) {
-      lines.push(`- \`${path6.basename(r.outputPath)}\` \u2014 ${r.error}`);
+      lines.push(`- \`${path10.basename(r.outputPath)}\` \u2014 ${r.error}`);
     }
   }
   if (skipped.length > 0) {
@@ -3481,13 +5013,13 @@ function writeIndexFile(outputDir, workspacePath, results, exportedAt, logger) {
     lines.push("## Skipped (File Already Existed)");
     lines.push("");
     for (const r of skipped) {
-      lines.push(`- \`${path6.basename(r.outputPath)}\``);
+      lines.push(`- \`${path10.basename(r.outputPath)}\``);
     }
   }
-  const indexPath = path6.join(outputDir, "INDEX.md");
+  const indexPath = path10.join(outputDir, "INDEX.md");
   try {
-    fs6.mkdirSync(outputDir, { recursive: true });
-    fs6.writeFileSync(indexPath, lines.join("\n"), "utf8");
+    fs9.mkdirSync(outputDir, { recursive: true });
+    fs9.writeFileSync(indexPath, lines.join("\n"), "utf8");
     logger.log(`Wrote index: ${indexPath}`);
   } catch (err) {
     logger.error(`Failed to write INDEX.md`, err);
@@ -3498,21 +5030,29 @@ function writeIndexFile(outputDir, workspacePath, results, exportedAt, logger) {
 var EXPORT_FOLDER = ".cursor-chat-export";
 function registerCommands(context, logger) {
   context.subscriptions.push(
-    vscode.commands.registerCommand(
+    vscode2.commands.registerCommand(
       "cursorChatExport.exportCurrentWorkspace",
       () => cmdExportCurrentWorkspace(logger)
     ),
-    vscode.commands.registerCommand(
+    vscode2.commands.registerCommand(
       "cursorChatExport.exportAllWorkspaces",
       () => cmdExportAllWorkspaces(logger)
     ),
-    vscode.commands.registerCommand(
+    vscode2.commands.registerCommand(
       "cursorChatExport.openExportFolder",
       () => cmdOpenExportFolder(logger)
     ),
-    vscode.commands.registerCommand(
+    vscode2.commands.registerCommand(
       "cursorChatExport.diagnose",
       () => cmdDiagnose(logger)
+    ),
+    vscode2.commands.registerCommand(
+      "cursorChatExport.diagnoseDiscovery",
+      () => cmdDiagnoseDiscovery(logger)
+    ),
+    vscode2.commands.registerCommand(
+      "cursorChatExport.rawDiscovery",
+      () => cmdRawDiscovery(logger)
     )
   );
   logger.log("Commands registered.");
@@ -3522,7 +5062,7 @@ async function cmdExportCurrentWorkspace(logger) {
   logger.log("=== Export Current Workspace Chats ===");
   const workspacePath = getActiveWorkspacePath();
   if (!workspacePath) {
-    vscode.window.showErrorMessage(
+    vscode2.window.showErrorMessage(
       "Cursor Chat Bulk Export: No workspace folder is currently open."
     );
     return;
@@ -3530,29 +5070,43 @@ async function cmdExportCurrentWorkspace(logger) {
   logger.log(`Active workspace: ${workspacePath}`);
   const globalStoragePath = getGlobalStoragePath(logger);
   if (!globalStoragePath) {
-    vscode.window.showErrorMessage(
+    vscode2.window.showErrorMessage(
       "Cursor Chat Bulk Export: Could not locate Cursor globalStorage directory. Make sure you are running this extension inside Cursor IDE."
     );
     return;
   }
   let conversations = [];
-  await vscode.window.withProgress(
+  let matchedComposers = [];
+  await vscode2.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location: vscode2.ProgressLocation.Notification,
       title: "Scanning Cursor storage\u2026",
       cancellable: false
     },
     async () => {
-      conversations = await loadConversationsForWorkspace(
+      const loaded = await loadConversationsForWorkspace(
         globalStoragePath,
         workspacePath,
-        logger
+        logger,
+        true
       );
+      conversations = loaded.conversations;
+      matchedComposers = loaded.composers;
     }
   );
   if (conversations.length === 0) {
-    vscode.window.showInformationMessage(
-      'Cursor Chat Bulk Export: No conversations found for the current workspace.\nCheck the "Cursor Chat Bulk Export" Output Channel for diagnostics.'
+    const globalDbPath = path11.join(
+      getGlobalStoragePath(logger) ?? "",
+      "state.vscdb"
+    );
+    const bytes = fs10.existsSync(globalDbPath) ? getDatabaseSizeBytes(globalDbPath) : 0;
+    let hint = 'Check the "Cursor Chat Bulk Export" Output Channel for diagnostics.';
+    if (isTooLargeForSqlJs(bytes) && !findSqlite3Executable(logger)) {
+      hint = `Your Cursor globalStorage database is ${formatSizeMb(bytes)} MB (over the 2 GB limit). Install SQLite CLI: winget install SQLite.SQLite \u2014 or download sqlite3.exe from sqlite.org and place it in the extension folder (see README). Then retry export.`;
+    }
+    vscode2.window.showInformationMessage(
+      `Cursor Chat Bulk Export: No conversations found for the current workspace.
+${hint}`
     );
     logger.show();
     return;
@@ -3565,23 +5119,62 @@ async function cmdExportCurrentWorkspace(logger) {
   if (!exportOptions) {
     return;
   }
-  const outputDir = path7.join(workspacePath, EXPORT_FOLDER);
-  await runExport(selected, workspacePath, outputDir, exportOptions, logger);
+  let toExport = selected;
+  const needsHydration = selected.some((c) => c.messages.length === 0);
+  if (needsHydration) {
+    await vscode2.window.withProgress(
+      {
+        location: vscode2.ProgressLocation.Notification,
+        title: "Loading chat messages\u2026",
+        cancellable: false
+      },
+      async (progress) => {
+        const total = selected.length;
+        toExport = await hydrateConversationsForExport(
+          selected,
+          matchedComposers,
+          globalStoragePath,
+          logger,
+          (current, tot, label) => {
+            progress.report({
+              message: `${current}/${tot}: ${label}`,
+              increment: 100 / tot
+            });
+          }
+        );
+        toExport = toExport.filter((c) => c.messages.length > 0);
+      }
+    );
+    if (toExport.length === 0) {
+      vscode2.window.showWarningMessage(
+        "Cursor Chat Bulk Export: No message content could be loaded for the selected chats."
+      );
+      logger.show();
+      return;
+    }
+    if (toExport.length < selected.length) {
+      vscode2.window.showWarningMessage(
+        `Loaded ${toExport.length}/${selected.length} conversations (others have no local message data).`
+      );
+    }
+  }
+  const outputDir = path11.join(workspacePath, EXPORT_FOLDER);
+  await runExport(toExport, workspacePath, outputDir, exportOptions, logger);
 }
 async function cmdExportAllWorkspaces(logger) {
   logger.show();
   logger.log("=== Export All Detected Workspace Chats ===");
   const globalStoragePath = getGlobalStoragePath(logger);
   if (!globalStoragePath) {
-    vscode.window.showErrorMessage(
+    vscode2.window.showErrorMessage(
       "Cursor Chat Bulk Export: Could not locate Cursor globalStorage directory."
     );
     return;
   }
   let allComposers = [];
-  await vscode.window.withProgress(
+  await vscode2.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location: vscode2.ProgressLocation.Notification,
       title: "Scanning all Cursor chats\u2026",
       cancellable: false
     },
@@ -3593,12 +5186,12 @@ async function cmdExportAllWorkspaces(logger) {
       try {
         allComposers = readAllComposerHeaders(db, logger);
       } finally {
-        closeDatabase(db, logger);
+        closeDatabaseBackend(db, logger);
       }
     }
   );
   if (allComposers.length === 0) {
-    vscode.window.showWarningMessage(
+    vscode2.window.showWarningMessage(
       "Cursor Chat Bulk Export: No conversations found in Cursor storage."
     );
     return;
@@ -3608,7 +5201,7 @@ async function cmdExportAllWorkspaces(logger) {
     const wsKey = c.workspaceFsPath ?? c.workspaceExternalUri ?? "(unknown workspace)";
     let label = wsKey;
     if (c.workspaceFsPath) {
-      label = path7.basename(c.workspaceFsPath) + "  " + c.workspaceFsPath;
+      label = path11.basename(c.workspaceFsPath) + "  " + c.workspaceFsPath;
     }
     if (!workspaceMap.has(wsKey)) {
       workspaceMap.set(wsKey, { label, composers: [] });
@@ -3616,12 +5209,12 @@ async function cmdExportAllWorkspaces(logger) {
     workspaceMap.get(wsKey).composers.push(c);
   }
   const workspaceItems = [...workspaceMap.entries()].map(([key, { label, composers }]) => ({
-    label: path7.basename(key === "(unknown workspace)" ? "Unknown" : key),
+    label: path11.basename(key === "(unknown workspace)" ? "Unknown" : key),
     description: key,
     detail: `${composers.length} conversation(s)`,
     key
   }));
-  const pickedWs = await vscode.window.showQuickPick(workspaceItems, {
+  const pickedWs = await vscode2.window.showQuickPick(workspaceItems, {
     title: `Select Workspace  (${workspaceItems.length} workspaces found)`,
     placeHolder: "Choose a workspace to export chats from\u2026"
   });
@@ -3630,9 +5223,9 @@ async function cmdExportAllWorkspaces(logger) {
   }
   const targetComposers = workspaceMap.get(pickedWs.key).composers;
   let conversations = [];
-  await vscode.window.withProgress(
+  await vscode2.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location: vscode2.ProgressLocation.Notification,
       title: "Loading conversations\u2026",
       cancellable: false
     },
@@ -3645,7 +5238,7 @@ async function cmdExportAllWorkspaces(logger) {
     }
   );
   if (conversations.length === 0) {
-    vscode.window.showInformationMessage(
+    vscode2.window.showInformationMessage(
       `Cursor Chat Bulk Export: No conversation content found for "${pickedWs.label}".`
     );
     return;
@@ -3659,31 +5252,31 @@ async function cmdExportAllWorkspaces(logger) {
     return;
   }
   const activeWs = getActiveWorkspacePath();
-  const outputDir = activeWs ? path7.join(activeWs, EXPORT_FOLDER) : path7.join(pickedWs.key, EXPORT_FOLDER);
+  const outputDir = activeWs ? path11.join(activeWs, EXPORT_FOLDER) : path11.join(pickedWs.key, EXPORT_FOLDER);
   await runExport(selected, pickedWs.key, outputDir, exportOptions, logger);
 }
 async function cmdOpenExportFolder(logger) {
   const workspacePath = getActiveWorkspacePath();
   if (!workspacePath) {
-    vscode.window.showErrorMessage(
+    vscode2.window.showErrorMessage(
       "Cursor Chat Bulk Export: No workspace folder is currently open."
     );
     return;
   }
-  const exportDir = path7.join(workspacePath, EXPORT_FOLDER);
-  if (!fs7.existsSync(exportDir)) {
-    const create = await vscode.window.showInformationMessage(
+  const exportDir = path11.join(workspacePath, EXPORT_FOLDER);
+  if (!fs10.existsSync(exportDir)) {
+    const create = await vscode2.window.showInformationMessage(
       `Export folder does not exist yet: ${exportDir}`,
       "Create it",
       "Cancel"
     );
     if (create === "Create it") {
-      fs7.mkdirSync(exportDir, { recursive: true });
+      fs10.mkdirSync(exportDir, { recursive: true });
     } else {
       return;
     }
   }
-  await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(exportDir));
+  await vscode2.commands.executeCommand("revealFileInOS", vscode2.Uri.file(exportDir));
 }
 async function cmdDiagnose(logger) {
   logger.show();
@@ -3691,7 +5284,7 @@ async function cmdDiagnose(logger) {
   const workspacePath = getActiveWorkspacePath();
   if (!workspacePath) {
     logger.warn("No workspace folder is currently open.");
-    vscode.window.showWarningMessage("Cursor Chat Bulk Export: Open a workspace folder first.");
+    vscode2.window.showWarningMessage("Cursor Chat Bulk Export: Open a workspace folder first.");
     return;
   }
   logger.log(`Active workspace: ${workspacePath}`);
@@ -3700,9 +5293,9 @@ async function cmdDiagnose(logger) {
     logger.error("Could not locate globalStorage directory.");
     return;
   }
-  await vscode.window.withProgress(
+  await vscode2.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location: vscode2.ProgressLocation.Notification,
       title: "Diagnosing Cursor storage\u2026",
       cancellable: false
     },
@@ -3713,7 +5306,7 @@ async function cmdDiagnose(logger) {
         return;
       }
       try {
-        const tables = listTables(db, logger);
+        const tables = listTablesBackend(db, logger);
         logger.log(`Tables: ${tables.map((t) => t.name).join(", ")}`);
         const hasDKV = hasCursorDiskKV(db, logger);
         logger.log(`Has cursorDiskKV: ${hasDKV}`);
@@ -3722,14 +5315,16 @@ async function cmdDiagnose(logger) {
           let wsHashes = [];
           if (wsStoragePath) {
             const entries = scanWorkspaceStorage(wsStoragePath, logger);
-            const matchingEntries = findMatchingEntries(entries, workspacePath, logger);
+            const matchingEntries = findMatchingEntries(entries, workspacePath, logger, {
+              includeByFolderName: await getIncludePossibleMatches()
+            });
             wsHashes = matchingEntries.map((e) => e.hash);
             logger.log(`workspaceStorage hashes: ${wsHashes.join(", ") || "(none found)"}`);
           }
           const allComposers = readAllComposerHeaders(db, logger);
           logger.log(`
 Total composers in cursorDiskKV: ${allComposers.length}`);
-          const matching = filterComposersByWorkspace(allComposers, workspacePath, logger, wsHashes);
+          const matching = filterComposersByWorkspace2(allComposers, workspacePath, logger, wsHashes);
           logger.log(`Composers matching current workspace: ${matching.length}`);
           if (matching.length === 0) {
             logger.warn("No matching composers. Listing all workspace paths found:");
@@ -3762,7 +5357,7 @@ Composer: "${comp.name}" (${comp.composerId})`);
           }
         } else {
           logger.log("Falling back to ItemTable scan...");
-          const rows = readItemTable(db, logger, "ItemTable");
+          const rows = readItemTableBackend(db, logger, "ItemTable");
           logger.log(`ItemTable rows: ${rows.length}`);
           const chatRows = filterChatRecords(rows, logger);
           logger.log(`Chat-related rows: ${chatRows.length}`);
@@ -3771,11 +5366,11 @@ Composer: "${comp.name}" (${comp.composerId})`);
           }
         }
       } finally {
-        closeDatabase(db, logger);
+        closeDatabaseBackend(db, logger);
       }
     }
   );
-  vscode.window.showInformationMessage(
+  vscode2.window.showInformationMessage(
     "Cursor Chat Bulk Export: Diagnosis complete \u2014 see Output Channel for details.",
     "Show Output"
   ).then((action) => {
@@ -3784,44 +5379,153 @@ Composer: "${comp.name}" (${comp.composerId})`);
     }
   });
 }
-async function loadConversationsForWorkspace(globalStoragePath, workspacePath, logger) {
+async function cmdDiagnoseDiscovery(logger) {
+  logger.show();
+  logger.log("=== Diagnose Conversation Discovery ===");
+  const workspacePath = getActiveWorkspacePath();
+  if (!workspacePath) {
+    vscode2.window.showWarningMessage("Cursor Chat Bulk Export: Open a workspace folder first.");
+    return;
+  }
+  const globalStoragePath = getGlobalStoragePath(logger);
   const wsStoragePath = getWorkspaceStoragePath(logger);
-  let workspaceHashes = [];
-  if (wsStoragePath) {
-    const entries = scanWorkspaceStorage(wsStoragePath, logger);
-    const matching = findMatchingEntries(entries, workspacePath, logger);
-    workspaceHashes = matching.map((e) => e.hash);
-    logger.log(`Workspace storage hashes: ${workspaceHashes.join(", ") || "(none)"}`);
-  }
-  const db = await openGlobalStorageDb(globalStoragePath, logger);
-  if (!db) {
-    return [];
-  }
-  try {
-    const allComposers = readAllComposerHeaders(db, logger);
-    const matching = filterComposersByWorkspace(allComposers, workspacePath, logger, workspaceHashes);
-    if (matching.length === 0) {
-      logger.warn(`No composers found for workspace: ${workspacePath}`);
-      logger.warn("All workspace paths found in storage:");
-      const paths = new Set(allComposers.map(
-        (c) => c.workspaceFsPath ?? c.workspaceExternalUri ?? `(hash: ${c.workspaceStorageId ?? "none"})`
-      ));
-      for (const p of paths) {
-        logger.log(`  ${p}`);
+  const includePossible = await getIncludePossibleMatches();
+  const uiCountStr = await vscode2.window.showInputBox({
+    title: "Cursor UI conversation count (optional)",
+    prompt: "How many conversations does Cursor show for this workspace? (e.g. 47) \u2014 leave empty to skip",
+    placeHolder: "47"
+  });
+  const uiCount = uiCountStr ? parseInt(uiCountStr, 10) : null;
+  let result;
+  await vscode2.window.withProgress(
+    {
+      location: vscode2.ProgressLocation.Notification,
+      title: "Running conversation discovery scan\u2026",
+      cancellable: false
+    },
+    async () => {
+      result = await discoverConversationsForWorkspace({
+        workspacePath,
+        globalStoragePath,
+        wsStoragePath,
+        logger,
+        includePossibleByFolderName: includePossible,
+        mode: "diagnostic"
+      });
+      if (uiCount !== null && !isNaN(uiCount)) {
+        const mm = buildMismatchExplanation({
+          uiCountHint: uiCount,
+          totalComposerData: result.report.totalComposerDataInGlobal,
+          allComposersParsed: result.allComposersInGlobal.length,
+          matchedComposers: result.matchedComposers.length,
+          candidates: result.candidates.length,
+          beforeDedupe: result.report.conversationsBeforeDedupe,
+          afterDedupe: result.conversations.length,
+          dedupeRemoved: result.report.dedupeRemoved.length
+        });
+        result.report.mismatchCase = mm.mismatchCase;
+        result.report.mismatchExplanation = mm.mismatchExplanation;
       }
-      return [];
     }
-    return await loadConversationsFromComposers(globalStoragePath, matching, logger, db);
-  } finally {
-    closeDatabase(db, logger);
+  );
+  if (!result) {
+    return;
   }
+  const discovery = result;
+  logDiscoveryReportToChannel(discovery.report, logger);
+  const reportPath = writeDiscoveryReportFile(workspacePath, discovery.report, logger);
+  vscode2.window.showInformationMessage(
+    `Discovery: ${discovery.conversations.length} conversations, ${discovery.candidates.length} candidates. Case ${discovery.report.mismatchCase}. See report.`,
+    "Open Report",
+    "Show Output"
+  ).then((action) => {
+    if (action === "Open Report") {
+      vscode2.commands.executeCommand("vscode.open", vscode2.Uri.file(reportPath));
+    } else if (action === "Show Output") {
+      logger.show();
+    }
+  });
+}
+async function cmdRawDiscovery(logger) {
+  logger.show();
+  const workspacePath = getActiveWorkspacePath();
+  if (!workspacePath) {
+    vscode2.window.showWarningMessage("Cursor Chat Bulk Export: Open a workspace folder first.");
+    return;
+  }
+  const globalStoragePath = getGlobalStoragePath(logger);
+  const wsStoragePath = getWorkspaceStoragePath(logger);
+  let rawResult;
+  await vscode2.window.withProgress(
+    {
+      location: vscode2.ProgressLocation.Notification,
+      title: "Scanning raw chat candidates\u2026",
+      cancellable: false
+    },
+    async () => {
+      rawResult = await discoverConversationsForWorkspace({
+        workspacePath,
+        globalStoragePath,
+        wsStoragePath,
+        logger,
+        includePossibleByFolderName: await getIncludePossibleMatches()
+      });
+    }
+  );
+  if (!rawResult || rawResult.candidates.length === 0) {
+    vscode2.window.showInformationMessage("No raw candidates found.");
+    return;
+  }
+  const items = rawResult.candidates.map((c) => ({
+    label: c.parsed ? `$(check) ${c.title ?? c.key}` : `$(warning) ${c.key}`,
+    description: `${c.parsed ? "parsed" : "not parsed"} \u2014 ${path11.basename(c.dbPath)}`,
+    detail: `${c.tableName} | ${c.valueSizeBytes} bytes | msgs\u2248${c.messageCountEstimate ?? "?"}`,
+    candidate: c
+  }));
+  const picked = await vscode2.window.showQuickPick(items, {
+    title: `Raw candidates (${rawResult.candidates.length}) \u2014 parsed: ${rawResult.conversations.length}`,
+    placeHolder: "Inspect raw discovery entries",
+    canPickMany: true
+  });
+  if (picked?.length) {
+    for (const p of picked) {
+      logger.log(
+        `RAW ${p.candidate.parsed ? "OK" : "FAIL"} ${p.candidate.dbPath} ${p.candidate.tableName} "${p.candidate.key}" \u2014 ${p.candidate.parseReason ?? "ok"}`
+      );
+    }
+    logger.show();
+  }
+}
+async function loadConversationsForWorkspace(globalStoragePath, workspacePath, logger, deferBubbleLoad = false) {
+  const wsStoragePath = getWorkspaceStoragePath(logger);
+  const includePossible = await getIncludePossibleMatches();
+  const result = await discoverConversationsForWorkspace({
+    workspacePath,
+    globalStoragePath,
+    wsStoragePath,
+    logger,
+    includePossibleByFolderName: includePossible,
+    mode: "export",
+    deferBubbleLoad
+  });
+  logger.log(
+    `Discovery: ${result.allComposersInGlobal.length} composers in global, ${result.matchedComposers.length} matched workspace, ${result.conversations.length} conversations after dedupe` + (deferBubbleLoad ? " (bubble load deferred)" : "")
+  );
+  return {
+    conversations: result.conversations,
+    composers: result.matchedComposers
+  };
+}
+async function getIncludePossibleMatches() {
+  const cfg = vscode2.workspace.getConfiguration("cursorChatExport");
+  return cfg.get("includePossibleWorkspaceMatches", true);
 }
 async function loadConversationsFromComposers(globalStoragePath, composers, logger, existingDb) {
   const conversations = [];
   let ownDb = false;
   let db = existingDb;
   if (!db) {
-    db = await openGlobalStorageDb(globalStoragePath, logger);
+    db = await openGlobalStorageDb(globalStoragePath, logger) ?? void 0;
     ownDb = true;
   }
   if (!db) {
@@ -3835,14 +5539,15 @@ Loading composer: "${composer.name}" (${composer.composerId})`);
         `  Headers: ${composer.headers.length}  isNAL: ${composer.isNAL}  mode: ${composer.unifiedMode}`
       );
       const renderableHeaders = composer.headers.filter((h) => h.isRenderable);
-      logger.log(`  Renderable headers: ${renderableHeaders.length}`);
-      if (renderableHeaders.length === 0) {
-        logger.log("  Skipping \u2014 no renderable messages");
-        continue;
-      }
-      const bubbles = loadBubblesForComposer(db, composer.composerId, logger);
+      logger.log(
+        `  Headers: ${composer.headers.length} total, ${renderableHeaders.length} renderable`
+      );
+      const bubbleIds = composer.headers.map((h) => h.bubbleId);
+      const bubbles = loadBubblesForComposer(db, composer.composerId, logger, bubbleIds);
       logger.log(`  Bubble records: ${bubbles.size}`);
-      const conv = composerToConversation(composer, bubbles, logger);
+      const conv = composerToConversation(composer, bubbles, logger, {
+        includeNonRenderable: true
+      });
       const msgCountByRole = conv.messages.reduce(
         (acc, m) => {
           acc[m.role] = (acc[m.role] ?? 0) + 1;
@@ -3858,8 +5563,8 @@ Loading composer: "${composer.name}" (${composer.composerId})`);
       conversations.push(conv);
     }
   } finally {
-    if (ownDb) {
-      closeDatabase(db, logger);
+    if (ownDb && db) {
+      closeDatabaseBackend(db, logger);
     }
   }
   logger.log(`
@@ -3871,18 +5576,20 @@ async function showConversationPicker(conversations) {
     const title = inferConversationTitle(c, i + 1);
     const date = c.createdAt ? c.createdAt.slice(0, 10) : "unknown date";
     const msgCount = c.messages.length;
+    const est = c.estimatedMessageCount ?? msgCount;
     const type = c.sessionType ? ` [${c.sessionType}]` : "";
     const userMsgs = c.messages.filter((m) => m.role === "user").length;
     const aiMsgs = c.messages.filter((m) => m.role === "assistant").length;
+    const detail = msgCount > 0 ? `${msgCount} messages (User: ${userMsgs}, Assistant: ${aiMsgs})` : `~${est} messages (will load on export)`;
     return {
       label: title,
       description: `${date}${type}`,
-      detail: `${msgCount} messages (User: ${userMsgs}, Assistant: ${aiMsgs})`,
+      detail,
       picked: true,
       conversation: c
     };
   });
-  const picked = await vscode.window.showQuickPick(items, {
+  const picked = await vscode2.window.showQuickPick(items, {
     title: `Select Conversations to Export  (${conversations.length} found)`,
     placeHolder: "Space to toggle \u2022 Enter to confirm \u2022 Esc to cancel",
     canPickMany: true,
@@ -3909,7 +5616,7 @@ async function showExportModePicker() {
       picked: false
     }
   ];
-  const picked = await vscode.window.showQuickPick(items, {
+  const picked = await vscode2.window.showQuickPick(items, {
     title: "Export Mode",
     placeHolder: "Choose how to filter the exported Markdown\u2026"
   });
@@ -3921,9 +5628,9 @@ async function runExport(conversations, workspacePath, outputDir, options, logge
   const exportedAt = /* @__PURE__ */ new Date();
   const usedNames = /* @__PURE__ */ new Set();
   const results = [];
-  if (fs7.existsSync(outputDir)) {
+  if (fs10.existsSync(outputDir)) {
     try {
-      const existing = fs7.readdirSync(outputDir);
+      const existing = fs10.readdirSync(outputDir);
       for (const f of existing) {
         if (f.endsWith(".md") && f !== "INDEX.md") {
           usedNames.add(f.slice(0, -3));
@@ -3932,9 +5639,9 @@ async function runExport(conversations, workspacePath, outputDir, options, logge
     } catch {
     }
   }
-  await vscode.window.withProgress(
+  await vscode2.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location: vscode2.ProgressLocation.Notification,
       title: "Exporting conversations\u2026",
       cancellable: false
     },
@@ -3976,17 +5683,17 @@ async function runExport(conversations, workspacePath, outputDir, options, logge
   const succeeded = results.filter((r) => !r.error && !r.skipped).length;
   const failed = results.filter((r) => r.error).length;
   const summary = `Exported ${succeeded} conversation(s) to \`${EXPORT_FOLDER}/\`` + (failed > 0 ? ` (${failed} failed \u2014 see Output channel)` : "");
-  const action = await vscode.window.showInformationMessage(
+  const action = await vscode2.window.showInformationMessage(
     `Cursor Chat Bulk Export: ${summary}`,
     "Open Folder",
     "Dismiss"
   );
   if (action === "Open Folder") {
-    await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(outputDir));
+    await vscode2.commands.executeCommand("revealFileInOS", vscode2.Uri.file(outputDir));
   }
 }
 function getActiveWorkspacePath() {
-  const folders = vscode.workspace.workspaceFolders;
+  const folders = vscode2.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
     return null;
   }
@@ -3996,7 +5703,7 @@ function getActiveWorkspacePath() {
 // src/extension.ts
 var outputChannel;
 function activate(context) {
-  outputChannel = vscode2.window.createOutputChannel("Cursor Chat Bulk Export");
+  outputChannel = vscode3.window.createOutputChannel("Cursor Chat Bulk Export");
   const logger = createLogger(outputChannel);
   logger.log("Cursor Chat Bulk Export extension activated.");
   registerCommands(context, logger);

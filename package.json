@@ -4,7 +4,14 @@
   "description": "Export Cursor chat/composer/agent conversations to Markdown files bulk",
   "version": "0.1.0",
   "publisher": "AnasAbbasCode",
-   
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anasabbasdev/cursor-chat-bulk-export.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anasabbasdev/cursor-chat-bulk-export/issues"
+  },
+  "homepage": "https://github.com/anasabbasdev/cursor-chat-bulk-export#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -39,8 +46,31 @@
       {
         "command": "cursorChatExport.diagnose",
         "title": "Cursor Chat Bulk Export: Diagnose Current Workspace Chat Schema"
+      },
+      {
+        "command": "cursorChatExport.diagnoseDiscovery",
+        "title": "Cursor Chat Bulk Export: Diagnose Conversation Discovery"
+      },
+      {
+        "command": "cursorChatExport.rawDiscovery",
+        "title": "Cursor Chat Bulk Export: Raw Discovery Mode"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Cursor Chat Bulk Export",
+      "properties": {
+        "cursorChatExport.includePossibleWorkspaceMatches": {
+          "type": "boolean",
+          "default": true,
+          "description": "Match conversations by folder name when the project path changed (recommended for moved projects)."
+        },
+        "cursorChatExport.cursorUserDataPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to Cursor User folder (e.g. D:\\Cursor\\User from an old PC copy). Overrides default APPDATA path."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

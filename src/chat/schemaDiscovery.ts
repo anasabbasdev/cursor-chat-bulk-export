@@ -32,8 +32,16 @@ const CHAT_KEY_PATTERNS: RegExp[] = [
   /cursor\.agent/i,
   /chatHistory/i,
   /conversationHistory/i,
+  /conversation/i,
   /bubbleId/i,
-  /tabs/i,          // composer stores tabs array
+  /bubble/i,
+  /tabs/i,
+  /workbench/i,
+  /archive/i,
+  /history/i,
+  /thread/i,
+  /session/i,
+  /message/i,
 ];
 
 /**

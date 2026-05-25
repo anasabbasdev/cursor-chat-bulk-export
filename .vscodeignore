@@ -1,8 +1,11 @@
-out/**
-node_modules/**
-src/**
 .vscode/**
-*.map
+.vscode-test/**
+src/**
+node_modules/**
+.gitignore
+.yarnrc
 **/*.ts
 tsconfig.json
-.vscodeignore
+build.js
+**/*.map
+*.vsix

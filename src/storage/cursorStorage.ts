@@ -1,6 +1,7 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as vscode from 'vscode';
 import type { Logger } from '../types';
 
 /**
@@ -10,6 +11,20 @@ import type { Logger } from '../types';
  *   2. Platform-specific default
  */
 export function getCursorUserDataPath(logger: Logger): string | null {
+  try {
+    const setting = vscode.workspace.getConfiguration('cursorChatExport').get<string>('cursorUserDataPath', '').trim();
+    if (setting) {
+      const resolved = path.resolve(setting);
+      if (fs.existsSync(resolved)) {
+        logger.log(`Using cursorChatExport.cursorUserDataPath: ${resolved}`);
+        return resolved;
+      }
+      logger.warn(`cursorUserDataPath not found: ${resolved}`);
+    }
+  } catch {
+    // ignore
+  }
+
   const override = process.env['CURSOR_APPDATA'];
   if (override) {
     logger.log(`Using CURSOR_APPDATA override: ${override}`);

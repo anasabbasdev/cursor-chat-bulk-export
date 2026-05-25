@@ -19,6 +19,20 @@ function copySqlWasm() {
   console.log('Copied sql-wasm.wasm → out/sql-wasm.wasm');
 }
 
+/** Optional: bundle sqlite3.exe for Windows large-DB support (place in tools/sqlite3.exe first). */
+function copySqlite3Cli() {
+  const destDir = path.join(__dirname, 'out');
+  const isWin = process.platform === 'win32';
+  const name = isWin ? 'sqlite3.exe' : 'sqlite3';
+  const src = path.join(__dirname, 'tools', name);
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.copyFileSync(src, path.join(destDir, name));
+  console.log(`Copied ${name} → out/${name}`);
+}
+
 const buildOptions = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
@@ -33,6 +47,7 @@ const buildOptions = {
 
 async function main() {
   copySqlWasm();
+  copySqlite3Cli();
 
   if (isWatch) {
     const ctx = await esbuild.context(buildOptions);

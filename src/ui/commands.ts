@@ -23,12 +23,25 @@ import {
   type ComposerHeader,
 } from '../storage/cursorDiskKV';
 import {
-  openDatabase,
-  closeDatabase,
-  listTables,
-  readItemTable,
-  readAllKeyValueTables,
+  discoverConversationsForWorkspace,
+  hydrateConversationsForExport,
+} from '../discovery/conversationDiscovery';
+import type { DiscoveryResult, RawCandidate } from '../discovery/types';
+import {
+  buildMismatchExplanation,
+  logDiscoveryReportToChannel,
+  writeDiscoveryReportFile,
+} from '../discovery/discoveryReport';
+import type { DbBackend } from '../storage/dbBackend';
+import { isTooLargeForSqlJs, getDatabaseSizeBytes, formatSizeMb } from '../storage/dbBackend';
+import { findSqlite3Executable } from '../storage/sqliteCliReader';
+import {
+  openDatabaseBackend,
+  closeDatabaseBackend,
+  listTablesBackend,
+  readItemTableBackend,
 } from '../storage/sqliteReader';
+import type { WorkspaceStorageEntry } from '../types';
 import { filterChatRecords } from '../chat/schemaDiscovery';
 import {
   parseConversations as parseLegacyConversations,
@@ -69,6 +82,12 @@ export function registerCommands(context: vscode.ExtensionContext, logger: Logge
     ),
     vscode.commands.registerCommand('cursorChatExport.diagnose', () =>
       cmdDiagnose(logger)
+    ),
+    vscode.commands.registerCommand('cursorChatExport.diagnoseDiscovery', () =>
+      cmdDiagnoseDiscovery(logger)
+    ),
+    vscode.commands.registerCommand('cursorChatExport.rawDiscovery', () =>
+      cmdRawDiscovery(logger)
     )
   );
 
@@ -102,6 +121,7 @@ async function cmdExportCurrentWorkspace(logger: Logger): Promise<void> {
   }
 
   let conversations: Conversation[] = [];
+  let matchedComposers: ComposerHeader[] = [];
 
   await vscode.window.withProgress(
     {
@@ -110,18 +130,33 @@ async function cmdExportCurrentWorkspace(logger: Logger): Promise<void> {
       cancellable: false,
     },
     async () => {
-      conversations = await loadConversationsForWorkspace(
+      const loaded = await loadConversationsForWorkspace(
         globalStoragePath,
         workspacePath,
-        logger
+        logger,
+        true
       );
+      conversations = loaded.conversations;
+      matchedComposers = loaded.composers;
     }
   );
 
   if (conversations.length === 0) {
+    const globalDbPath = path.join(
+      getGlobalStoragePath(logger) ?? '',
+      'state.vscdb'
+    );
+    const bytes = fs.existsSync(globalDbPath) ? getDatabaseSizeBytes(globalDbPath) : 0;
+    let hint =
+      'Check the "Cursor Chat Bulk Export" Output Channel for diagnostics.';
+    if (isTooLargeForSqlJs(bytes) && !findSqlite3Executable(logger)) {
+      hint =
+        `Your Cursor globalStorage database is ${formatSizeMb(bytes)} MB (over the 2 GB limit). ` +
+        'Install SQLite CLI: winget install SQLite.SQLite — or download sqlite3.exe from sqlite.org ' +
+        'and place it in the extension folder (see README). Then retry export.';
+    }
     vscode.window.showInformationMessage(
-      'Cursor Chat Bulk Export: No conversations found for the current workspace.\n' +
-        'Check the "Cursor Chat Bulk Export" Output Channel for diagnostics.'
+      `Cursor Chat Bulk Export: No conversations found for the current workspace.\n${hint}`
     );
     logger.show();
     return;
@@ -137,8 +172,48 @@ async function cmdExportCurrentWorkspace(logger: Logger): Promise<void> {
     return;
   }
 
+  let toExport = selected;
+  const needsHydration = selected.some(c => c.messages.length === 0);
+  if (needsHydration) {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Loading chat messages…',
+        cancellable: false,
+      },
+      async progress => {
+        const total = selected.length;
+        toExport = await hydrateConversationsForExport(
+          selected,
+          matchedComposers,
+          globalStoragePath,
+          logger,
+          (current, tot, label) => {
+            progress.report({
+              message: `${current}/${tot}: ${label}`,
+              increment: 100 / tot,
+            });
+          }
+        );
+        toExport = toExport.filter(c => c.messages.length > 0);
+      }
+    );
+    if (toExport.length === 0) {
+      vscode.window.showWarningMessage(
+        'Cursor Chat Bulk Export: No message content could be loaded for the selected chats.'
+      );
+      logger.show();
+      return;
+    }
+    if (toExport.length < selected.length) {
+      vscode.window.showWarningMessage(
+        `Loaded ${toExport.length}/${selected.length} conversations (others have no local message data).`
+      );
+    }
+  }
+
   const outputDir = path.join(workspacePath, EXPORT_FOLDER);
-  await runExport(selected, workspacePath, outputDir, exportOptions, logger);
+  await runExport(toExport, workspacePath, outputDir, exportOptions, logger);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +248,7 @@ async function cmdExportAllWorkspaces(logger: Logger): Promise<void> {
       try {
         allComposers = readAllComposerHeaders(db, logger);
       } finally {
-        closeDatabase(db, logger);
+        closeDatabaseBackend(db, logger);
       }
     }
   );
@@ -323,7 +398,7 @@ async function cmdDiagnose(logger: Logger): Promise<void> {
       }
 
       try {
-        const tables = listTables(db, logger);
+        const tables = listTablesBackend(db, logger);
         logger.log(`Tables: ${tables.map(t => t.name).join(', ')}`);
 
         const hasDKV = hasCursorDiskKV(db, logger);
@@ -334,7 +409,9 @@ async function cmdDiagnose(logger: Logger): Promise<void> {
           let wsHashes: string[] = [];
           if (wsStoragePath) {
             const entries = scanWorkspaceStorage(wsStoragePath, logger);
-            const matchingEntries = findMatchingEntries(entries, workspacePath, logger);
+            const matchingEntries = findMatchingEntries(entries, workspacePath, logger, {
+              includeByFolderName: await getIncludePossibleMatches(),
+            });
             wsHashes = matchingEntries.map(e => e.hash);
             logger.log(`workspaceStorage hashes: ${wsHashes.join(', ') || '(none found)'}`);
           }
@@ -380,7 +457,7 @@ async function cmdDiagnose(logger: Logger): Promise<void> {
         } else {
           // Legacy: check ItemTable
           logger.log('Falling back to ItemTable scan...');
-          const rows = readItemTable(db, logger, 'ItemTable');
+          const rows = readItemTableBackend(db, logger, 'ItemTable');
           logger.log(`ItemTable rows: ${rows.length}`);
           const chatRows = filterChatRecords(rows, logger);
           logger.log(`Chat-related rows: ${chatRows.length}`);
@@ -389,7 +466,7 @@ async function cmdDiagnose(logger: Logger): Promise<void> {
           }
         }
       } finally {
-        closeDatabase(db, logger);
+        closeDatabaseBackend(db, logger);
       }
     }
   );
@@ -405,49 +482,264 @@ async function cmdDiagnose(logger: Logger): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Command: Diagnose Conversation Discovery
+// ---------------------------------------------------------------------------
+
+async function cmdDiagnoseDiscovery(logger: Logger): Promise<void> {
+  logger.show();
+  logger.log('=== Diagnose Conversation Discovery ===');
+
+  const workspacePath = getActiveWorkspacePath();
+  if (!workspacePath) {
+    vscode.window.showWarningMessage('Cursor Chat Bulk Export: Open a workspace folder first.');
+    return;
+  }
+
+  const globalStoragePath = getGlobalStoragePath(logger);
+  const wsStoragePath = getWorkspaceStoragePath(logger);
+  const includePossible = await getIncludePossibleMatches();
+
+  const uiCountStr = await vscode.window.showInputBox({
+    title: 'Cursor UI conversation count (optional)',
+    prompt: 'How many conversations does Cursor show for this workspace? (e.g. 47) — leave empty to skip',
+    placeHolder: '47',
+  });
+  const uiCount = uiCountStr ? parseInt(uiCountStr, 10) : null;
+
+  let result: DiscoveryResult | undefined;
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'Running conversation discovery scan…',
+      cancellable: false,
+    },
+    async () => {
+      result = await discoverConversationsForWorkspace({
+        workspacePath,
+        globalStoragePath,
+        wsStoragePath,
+        logger,
+        includePossibleByFolderName: includePossible,
+        mode: 'diagnostic',
+      });
+
+      if (uiCount !== null && !isNaN(uiCount)) {
+        const mm = buildMismatchExplanation({
+          uiCountHint: uiCount,
+          totalComposerData: result.report.totalComposerDataInGlobal,
+          allComposersParsed: result.allComposersInGlobal.length,
+          matchedComposers: result.matchedComposers.length,
+          candidates: result.candidates.length,
+          beforeDedupe: result.report.conversationsBeforeDedupe,
+          afterDedupe: result.conversations.length,
+          dedupeRemoved: result.report.dedupeRemoved.length,
+        });
+        result.report.mismatchCase = mm.mismatchCase;
+        result.report.mismatchExplanation = mm.mismatchExplanation;
+      }
+    }
+  );
+
+  if (!result) {
+    return;
+  }
+
+  const discovery = result;
+  logDiscoveryReportToChannel(discovery.report, logger);
+  const reportPath = writeDiscoveryReportFile(workspacePath, discovery.report, logger);
+
+  vscode.window.showInformationMessage(
+    `Discovery: ${discovery.conversations.length} conversations, ${discovery.candidates.length} candidates. Case ${discovery.report.mismatchCase}. See report.`,
+    'Open Report',
+    'Show Output'
+  ).then(action => {
+    if (action === 'Open Report') {
+      vscode.commands.executeCommand('vscode.open', vscode.Uri.file(reportPath));
+    } else if (action === 'Show Output') {
+      logger.show();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Command: Raw discovery mode
+// ---------------------------------------------------------------------------
+
+async function cmdRawDiscovery(logger: Logger): Promise<void> {
+  logger.show();
+  const workspacePath = getActiveWorkspacePath();
+  if (!workspacePath) {
+    vscode.window.showWarningMessage('Cursor Chat Bulk Export: Open a workspace folder first.');
+    return;
+  }
+
+  const globalStoragePath = getGlobalStoragePath(logger);
+  const wsStoragePath = getWorkspaceStoragePath(logger);
+
+  let rawResult: DiscoveryResult | undefined;
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'Scanning raw chat candidates…',
+      cancellable: false,
+    },
+    async () => {
+      rawResult = await discoverConversationsForWorkspace({
+        workspacePath,
+        globalStoragePath,
+        wsStoragePath,
+        logger,
+        includePossibleByFolderName: await getIncludePossibleMatches(),
+      });
+    }
+  );
+
+  if (!rawResult || rawResult.candidates.length === 0) {
+    vscode.window.showInformationMessage('No raw candidates found.');
+    return;
+  }
+
+  type PickItem = vscode.QuickPickItem & { candidate: RawCandidate };
+  const items: PickItem[] = rawResult.candidates.map(c => ({
+    label: c.parsed ? `$(check) ${c.title ?? c.key}` : `$(warning) ${c.key}`,
+    description: `${c.parsed ? 'parsed' : 'not parsed'} — ${path.basename(c.dbPath)}`,
+    detail: `${c.tableName} | ${c.valueSizeBytes} bytes | msgs≈${c.messageCountEstimate ?? '?'}`,
+    candidate: c,
+  }));
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `Raw candidates (${rawResult.candidates.length}) — parsed: ${rawResult.conversations.length}`,
+    placeHolder: 'Inspect raw discovery entries',
+    canPickMany: true,
+  });
+
+  if (picked?.length) {
+    for (const p of picked) {
+      logger.log(
+        `RAW ${p.candidate.parsed ? 'OK' : 'FAIL'} ${p.candidate.dbPath} ${p.candidate.tableName} "${p.candidate.key}" — ${p.candidate.parseReason ?? 'ok'}`
+      );
+    }
+    logger.show();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Loading conversations
 // ---------------------------------------------------------------------------
 
 async function loadConversationsForWorkspace(
   globalStoragePath: string,
   workspacePath: string,
+  logger: Logger,
+  deferBubbleLoad = false
+): Promise<{ conversations: Conversation[]; composers: ComposerHeader[] }> {
+  const wsStoragePath = getWorkspaceStoragePath(logger);
+  const includePossible = await getIncludePossibleMatches();
+
+  const result = await discoverConversationsForWorkspace({
+    workspacePath,
+    globalStoragePath,
+    wsStoragePath,
+    logger,
+    includePossibleByFolderName: includePossible,
+    mode: 'export',
+    deferBubbleLoad,
+  });
+
+  logger.log(
+    `Discovery: ${result.allComposersInGlobal.length} composers in global, ` +
+      `${result.matchedComposers.length} matched workspace, ` +
+      `${result.conversations.length} conversations after dedupe` +
+      (deferBubbleLoad ? ' (bubble load deferred)' : '')
+  );
+
+  return {
+    conversations: result.conversations,
+    composers: result.matchedComposers,
+  };
+}
+
+async function getIncludePossibleMatches(): Promise<boolean> {
+  const cfg = vscode.workspace.getConfiguration('cursorChatExport');
+  return cfg.get<boolean>('includePossibleWorkspaceMatches', true);
+}
+
+/**
+ * Fallback: read chats from per-workspace state.vscdb files (usually smaller than globalStorage).
+ */
+async function loadFromWorkspaceStorageDatabases(
+  wsStoragePath: string | null,
+  workspacePath: string,
+  workspaceHashes: string[],
   logger: Logger
 ): Promise<Conversation[]> {
-  // Get workspace storage hashes for this workspace (needed to match composers
-  // that only store workspaceIdentifier.id without a resolved URI)
-  const wsStoragePath = getWorkspaceStoragePath(logger);
-  let workspaceHashes: string[] = [];
-  if (wsStoragePath) {
-    const entries = scanWorkspaceStorage(wsStoragePath, logger);
-    const matching = findMatchingEntries(entries, workspacePath, logger);
-    workspaceHashes = matching.map(e => e.hash);
-    logger.log(`Workspace storage hashes: ${workspaceHashes.join(', ') || '(none)'}`);
+  if (!wsStoragePath) {
+    return [];
   }
 
-  const db = await openGlobalStorageDb(globalStoragePath, logger);
+  const entries = findMatchingEntries(
+    scanWorkspaceStorage(wsStoragePath, logger),
+    workspacePath,
+    logger,
+    { includeByFolderName: await getIncludePossibleMatches() }
+  );
+
+  if (entries.length === 0) {
+    logger.warn('No workspaceStorage entries to scan for fallback.');
+    return [];
+  }
+
+  logger.log(`Workspace DB fallback: scanning ${entries.length} storage folder(s)`);
+  const allConversations: Conversation[] = [];
+
+  for (const entry of entries) {
+    const convs = await loadConversationsFromWorkspaceEntry(entry, logger);
+    allConversations.push(...convs);
+  }
+
+  const seen = new Set<string>();
+  return allConversations.filter(c => {
+    if (seen.has(c.id)) {
+      return false;
+    }
+    seen.add(c.id);
+    return true;
+  });
+}
+
+async function loadConversationsFromWorkspaceEntry(
+  entry: WorkspaceStorageEntry,
+  logger: Logger
+): Promise<Conversation[]> {
+  if (!entry.dbPath || !fs.existsSync(entry.dbPath)) {
+    return [];
+  }
+
+  logger.log(`Opening workspace DB: ${entry.dbPath}`);
+  const db = await openDatabaseBackend(entry.dbPath, logger);
   if (!db) {
     return [];
   }
 
   try {
-    const allComposers = readAllComposerHeaders(db, logger);
-    const matching = filterComposersByWorkspace(allComposers, workspacePath, logger, workspaceHashes);
-
-    if (matching.length === 0) {
-      logger.warn(`No composers found for workspace: ${workspacePath}`);
-      logger.warn('All workspace paths found in storage:');
-      const paths = new Set(allComposers.map(c =>
-        c.workspaceFsPath ?? c.workspaceExternalUri ?? `(hash: ${c.workspaceStorageId ?? 'none'})`
-      ));
-      for (const p of paths) {
-        logger.log(`  ${p}`);
+    if (hasCursorDiskKV(db, logger)) {
+      const composers = readAllComposerHeaders(db, logger);
+      if (composers.length === 0) {
+        return [];
       }
-      return [];
+      return loadConversationsFromComposers(entry.storagePath, composers, logger, db);
     }
 
-    return await loadConversationsFromComposers(globalStoragePath, matching, logger, db);
+    const rows = readItemTableBackend(db, logger, 'ItemTable');
+    if (rows.length === 0) {
+      return [];
+    }
+    const chatRows = filterChatRecords(rows, logger);
+    return parseLegacyConversations(chatRows, entry.storagePath, logger);
   } finally {
-    closeDatabase(db, logger);
+    closeDatabaseBackend(db, logger);
   }
 }
 
@@ -455,15 +747,14 @@ async function loadConversationsFromComposers(
   globalStoragePath: string,
   composers: ComposerHeader[],
   logger: Logger,
-  existingDb?: ReturnType<typeof openDatabase> extends Promise<infer T> ? T : never
+  existingDb?: DbBackend
 ): Promise<Conversation[]> {
   const conversations: Conversation[] = [];
   let ownDb = false;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let db: any = existingDb;
+  let db: DbBackend | undefined = existingDb;
   if (!db) {
-    db = await openGlobalStorageDb(globalStoragePath, logger);
+    db = (await openGlobalStorageDb(globalStoragePath, logger)) ?? undefined;
     ownDb = true;
   }
 
@@ -479,17 +770,17 @@ async function loadConversationsFromComposers(
       );
 
       const renderableHeaders = composer.headers.filter(h => h.isRenderable);
-      logger.log(`  Renderable headers: ${renderableHeaders.length}`);
+      logger.log(
+        `  Headers: ${composer.headers.length} total, ${renderableHeaders.length} renderable`
+      );
 
-      if (renderableHeaders.length === 0) {
-        logger.log('  Skipping — no renderable messages');
-        continue;
-      }
-
-      const bubbles = loadBubblesForComposer(db, composer.composerId, logger);
+      const bubbleIds = composer.headers.map(h => h.bubbleId);
+      const bubbles = loadBubblesForComposer(db, composer.composerId, logger, bubbleIds);
       logger.log(`  Bubble records: ${bubbles.size}`);
 
-      const conv = composerToConversation(composer, bubbles, logger);
+      const conv = composerToConversation(composer, bubbles, logger, {
+        includeNonRenderable: true,
+      });
 
       const msgCountByRole = conv.messages.reduce(
         (acc, m) => { acc[m.role] = (acc[m.role] ?? 0) + 1; return acc; },
@@ -505,8 +796,8 @@ async function loadConversationsFromComposers(
       conversations.push(conv);
     }
   } finally {
-    if (ownDb) {
-      closeDatabase(db, logger);
+    if (ownDb && db) {
+      closeDatabaseBackend(db, logger);
     }
   }
 
@@ -527,13 +818,18 @@ async function showConversationPicker(
     const title = inferConversationTitle(c, i + 1);
     const date = c.createdAt ? c.createdAt.slice(0, 10) : 'unknown date';
     const msgCount = c.messages.length;
+    const est = c.estimatedMessageCount ?? msgCount;
     const type = c.sessionType ? ` [${c.sessionType}]` : '';
     const userMsgs = c.messages.filter(m => m.role === 'user').length;
     const aiMsgs = c.messages.filter(m => m.role === 'assistant').length;
+    const detail =
+      msgCount > 0
+        ? `${msgCount} messages (User: ${userMsgs}, Assistant: ${aiMsgs})`
+        : `~${est} messages (will load on export)`;
     return {
       label: title,
       description: `${date}${type}`,
-      detail: `${msgCount} messages (User: ${userMsgs}, Assistant: ${aiMsgs})`,
+      detail,
       picked: true,
       conversation: c,
     };
