@@ -6,6 +6,8 @@ Works in **Visual Studio Code** and **Cursor** (VS Code–compatible).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+**Author:** [Anas Abbas](https://anas-code.com) · **Website:** [anas-code.com](https://anas-code.com) · **Publisher:** AnasAbbasCode
+
 ---
 
 ## Why this extension?
@@ -369,11 +371,12 @@ src/
 
 ## Contributing & support
 
-- **Issues:** [github.com/anasabbasdev/cursor-chat-bulk-export/issues](https://github.com/anasabbasdev/cursor-chat-bulk-export/issues)
+- **Website:** [anas-code.com](https://anas-code.com)
 - **Repository:** [github.com/anasabbasdev/cursor-chat-bulk-export](https://github.com/anasabbasdev/cursor-chat-bulk-export)
+- **Issues:** [github.com/anasabbasdev/cursor-chat-bulk-export/issues](https://github.com/anasabbasdev/cursor-chat-bulk-export/issues)
 
 ---
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) Anas Abbas Code
+[MIT](LICENSE) — Copyright (c) 2026 [Anas Abbas](https://anas-code.com)

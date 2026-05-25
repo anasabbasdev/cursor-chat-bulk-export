@@ -2,8 +2,13 @@
   "name": "cursor-chat-bulk-export",
   "displayName": "Cursor Chat Bulk Export",
   "description": "Export Cursor chat/composer/agent conversations to Markdown files bulk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "AnasAbbasCode",
+  "license": "MIT",
+  "author": {
+    "name": "Anas Abbas",
+    "url": "https://anas-code.com"
+  },
   "icon": "images/icon.png",
   "galleryBanner": {
     "color": "#1e1e1e",
@@ -16,7 +21,7 @@
   "bugs": {
     "url": "https://github.com/anasabbasdev/cursor-chat-bulk-export/issues"
   },
-  "homepage": "https://github.com/anasabbasdev/cursor-chat-bulk-export#readme",
+  "homepage": "https://anas-code.com",
   "engines": {
     "vscode": "^1.85.0"
   },
